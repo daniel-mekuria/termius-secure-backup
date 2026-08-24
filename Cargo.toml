@@ -1,0 +1,51 @@
+[package]
+name = "termius-secure-backup"
+version = "0.1.0"
+authors = ["Daniel Mekuria <mekuriadaniel4@gmail.com>"]
+edition = "2021"
+rust-version = "1.74"
+license = "Apache-2.0"
+description = "Encrypted backup and restore for the local Termius desktop data directory."
+readme = "README.md"
+homepage = "https://github.com/daniel-mekuria/termius-secure-backup"
+repository = "https://github.com/daniel-mekuria/termius-secure-backup"
+keywords = ["termius", "backup", "encryption", "ssh", "cli"]
+categories = ["command-line-utilities", "cryptography"]
+exclude = ["/target", "/.github", "*.tsb"]
+
+[[bin]]
+name = "termius-backup"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive", "wrap_help"] }
+argon2 = "0.5"
+chacha20poly1305 = "0.10"
+rand = "0.8"
+getrandom = "0.2"
+tar = "0.4"
+zstd = "0.13"
+rpassword = "7.3"
+dialoguer = "0.11"
+dirs = "5.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+anyhow = "1"
+sha2 = "0.10"
+tempfile = "3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+time = { version = "0.3", features = ["formatting", "macros", "parsing"] }
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+proptest = "1"
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = "symbols"
+panic = "abort"

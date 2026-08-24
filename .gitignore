@@ -1,0 +1,21 @@
+# Rust build artifacts
+/target
+**/*.rs.bk
+Cargo.lock.bak
+
+# Backup files produced by the tool / tests
+*.tsb
+*.tsb.tmp
+
+# Local snapshot store (tests may populate it)
+.termius-secure-backup/
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Test scratch
+/tmp-test-*/
