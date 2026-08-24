@@ -10,7 +10,9 @@ Termius is an Electron-based SSH/terminal client. It stores your local data
 (hosts, groups, keys, snippets, port-forwarding rules, known hosts, and the
 offline encrypted copy of your vaults) in its Electron `userData` directory,
 which lives in a different place on each operating system. Termius has **no
-built-in backup feature for this local data** — this tool fills that gap.
+built-in backup feature for this local data** — it only offers **paid cloud
+sync** — so this tool fills the gap with a local, offline, password-encrypted
+backup you fully control.
 
 > ⚠️ **Sandbox caveat.** Builds installed from the **Mac App Store** or via
 > **Snap** run in a sandbox and use different, sandbox-specific paths, and
