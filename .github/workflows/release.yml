@@ -58,13 +58,12 @@ jobs:
               (cd stage && tar czf "../${archive}.tar.gz" "${{ matrix.artifact }}")
               ;;
           esac
-          # Checksum sidecar for whichever archives exist on this platform.
-          # (Each line is an `&&` list so a missing file short-circuits
-          # without tripping `set -e`; the file is pre-created so it always
-          # exists even if neither archive is produced.)
+          # Checksum sidecar covering whichever archives this platform
+          # actually produced. Use `if` guards (not `&&` lists) so a missing
+          # archive never returns non-zero and trips `set -e`.
           : > "${archive}.sha256"
-          [ -f "${archive}.tar.gz" ] && sha256sum "${archive}.tar.gz" >> "${archive}.sha256"
-          [ -f "${archive}.zip" ]   && sha256sum "${archive}.zip"   >> "${archive}.sha256"
+          if [ -f "${archive}.tar.gz" ]; then sha256sum "${archive}.tar.gz" >> "${archive}.sha256"; fi
+          if [ -f "${archive}.zip" ];   then sha256sum "${archive}.zip"   >> "${archive}.sha256"; fi
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
