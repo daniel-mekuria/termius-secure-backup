@@ -40,6 +40,32 @@ pub struct Cli {
     pub verbose: bool,
 }
 
+/// Owned global flags extracted from a parsed [`Cli`], plus the selected
+/// subcommand. The per-command args are moved out while the shared flags
+/// remain available as owned locals for the duration of a command.
+pub struct Globals {
+    pub command: Command,
+    pub termius_dir: Option<PathBuf>,
+    pub snapshots_dir: Option<PathBuf>,
+    pub password_file: Option<PathBuf>,
+    pub password_env: Option<String>,
+    pub yes: bool,
+}
+
+impl Globals {
+    /// Consume a parsed [`Cli`] and split it into globals + subcommand.
+    pub fn from_cli(cli: Cli) -> Self {
+        Globals {
+            command: cli.command.unwrap_or_default(),
+            termius_dir: cli.termius_dir,
+            snapshots_dir: cli.snapshots_dir,
+            password_file: cli.password_file,
+            password_env: cli.password_env,
+            yes: cli.yes,
+        }
+    }
+}
+
 #[derive(Subcommand, Debug)]
 pub enum Command {
     /// Back up the Termius data directory into an encrypted .tsb file.

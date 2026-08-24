@@ -1,50 +1,45 @@
 // termius-secure-backup — encrypted backup/restore for the local Termius data directory.
 // SPDX-License-Identifier: Apache-2.0
 
-#![deny(unsafe_op_in_unsafe_fn)]
-
-mod archive;
-mod backup;
-mod cli;
-mod container;
-mod crypto;
-mod error;
-mod paths;
-mod prompt;
-mod restore;
-mod rollback;
-mod snapshot;
-mod util;
-mod weakpass;
+//! Binary entry point: a thin wrapper over the `termius_secure_backup` library.
 
 use clap::Parser;
 use std::process::ExitCode;
 
-use crate::cli::{Cli, Command, SnapshotsAction};
-use crate::error::ExitCode as AppExitCode;
+use termius_secure_backup::cli::{Cli, Command, Globals, SnapshotsAction};
+use termius_secure_backup::error::ExitCode as AppExitCode;
+use termius_secure_backup::util;
+use termius_secure_backup::{backup, container, crypto, paths, restore, rollback, snapshot};
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
     util::init_logging(cli.verbose);
-    // Destructure so the per-command args can be moved out while the global
-    // flags remain available as owned locals.
-    let Cli {
+    let globals = Globals::from_cli(cli);
+    // Destructure so the per-command arg can be moved out while the shared
+    // flags remain borrowable as a group.
+    let Globals {
         command,
         termius_dir,
         snapshots_dir,
         password_file,
         password_env,
         yes,
-        verbose: _,
-    } = cli;
-    let globals = Globals {
+    } = globals;
+    let g = Refs {
         termius_dir,
         snapshots_dir,
         password_file,
         password_env,
         yes,
     };
-    match run(command.unwrap_or_default(), &globals) {
+    let result = match command {
+        Command::Backup(a) => run_backup(&g, a),
+        Command::Restore(a) => run_restore(&g, a),
+        Command::Rollback(a) => run_rollback(&g, a),
+        Command::Info(a) => run_info(a),
+        Command::Snapshots(a) => run_snapshots(&g, a.action),
+    };
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("error: {e}");
@@ -53,7 +48,8 @@ fn main() -> ExitCode {
     }
 }
 
-struct Globals {
+/// Borrowed view of the shared global flags.
+struct Refs {
     termius_dir: Option<std::path::PathBuf>,
     snapshots_dir: Option<std::path::PathBuf>,
     password_file: Option<std::path::PathBuf>,
@@ -61,22 +57,30 @@ struct Globals {
     yes: bool,
 }
 
-fn run(command: Command, g: &Globals) -> error::Result<()> {
-    match command {
-        Command::Backup(a) => run_backup(g, a),
-        Command::Restore(a) => run_restore(g, a),
-        Command::Rollback(a) => run_rollback(g, a),
-        Command::Info(a) => run_info(a),
-        Command::Snapshots(a) => run_snapshots(g, a.action),
+impl Refs {
+    fn termius_dir(&self) -> Option<&std::path::Path> {
+        self.termius_dir.as_deref()
+    }
+    fn snapshots_dir(&self) -> Option<&std::path::Path> {
+        self.snapshots_dir.as_deref()
+    }
+    fn password_file(&self) -> Option<&std::path::Path> {
+        self.password_file.as_deref()
+    }
+    fn password_env(&self) -> Option<&str> {
+        self.password_env.as_deref()
     }
 }
 
-fn run_backup(g: &Globals, a: cli::BackupArgs) -> error::Result<()> {
+fn run_backup(
+    g: &Refs,
+    a: termius_secure_backup::cli::BackupArgs,
+) -> termius_secure_backup::error::Result<()> {
     let opts = backup::Options {
-        termius_dir: g.termius_dir.as_deref(),
+        termius_dir: g.termius_dir(),
         out: a.out.as_deref(),
-        password_file: g.password_file.as_deref(),
-        password_env: g.password_env.as_deref(),
+        password_file: g.password_file(),
+        password_env: g.password_env(),
         yes: g.yes,
         kdf: crypto::KdfParams::default(),
     };
@@ -85,13 +89,16 @@ fn run_backup(g: &Globals, a: cli::BackupArgs) -> error::Result<()> {
     Ok(())
 }
 
-fn run_restore(g: &Globals, a: cli::RestoreArgs) -> error::Result<()> {
+fn run_restore(
+    g: &Refs,
+    a: termius_secure_backup::cli::RestoreArgs,
+) -> termius_secure_backup::error::Result<()> {
     let opts = restore::Options {
         backup_file: &a.file,
-        termius_dir: g.termius_dir.as_deref(),
-        snapshots_dir: g.snapshots_dir.as_deref(),
-        password_file: g.password_file.as_deref(),
-        password_env: g.password_env.as_deref(),
+        termius_dir: g.termius_dir(),
+        snapshots_dir: g.snapshots_dir(),
+        password_file: g.password_file(),
+        password_env: g.password_env(),
         yes: g.yes,
     };
     let p = restore::run(opts)?;
@@ -99,10 +106,13 @@ fn run_restore(g: &Globals, a: cli::RestoreArgs) -> error::Result<()> {
     Ok(())
 }
 
-fn run_rollback(g: &Globals, a: cli::RollbackArgs) -> error::Result<()> {
+fn run_rollback(
+    g: &Refs,
+    a: termius_secure_backup::cli::RollbackArgs,
+) -> termius_secure_backup::error::Result<()> {
     let opts = rollback::Options {
-        termius_dir: g.termius_dir.as_deref(),
-        snapshots_dir: g.snapshots_dir.as_deref(),
+        termius_dir: g.termius_dir(),
+        snapshots_dir: g.snapshots_dir(),
         yes: g.yes,
         snap_id: a.snap_id.clone(),
     };
@@ -111,9 +121,9 @@ fn run_rollback(g: &Globals, a: cli::RollbackArgs) -> error::Result<()> {
     Ok(())
 }
 
-fn run_info(a: cli::InfoArgs) -> error::Result<()> {
+fn run_info(a: termius_secure_backup::cli::InfoArgs) -> termius_secure_backup::error::Result<()> {
     if !a.file.is_file() {
-        return Err(error::Error::NotFound(format!(
+        return Err(termius_secure_backup::error::Error::NotFound(format!(
             "file not found: {}",
             a.file.display()
         )));
@@ -123,8 +133,8 @@ fn run_info(a: cli::InfoArgs) -> error::Result<()> {
     Ok(())
 }
 
-fn run_snapshots(g: &Globals, action: SnapshotsAction) -> error::Result<()> {
-    let snaps = paths::resolve_snapshots_dir(g.snapshots_dir.as_deref())?;
+fn run_snapshots(g: &Refs, action: SnapshotsAction) -> termius_secure_backup::error::Result<()> {
+    let snaps = paths::resolve_snapshots_dir(g.snapshots_dir())?;
     match action {
         SnapshotsAction::List => {
             let entries = snapshot::list(&snaps)?;
