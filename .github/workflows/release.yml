@@ -59,10 +59,12 @@ jobs:
               ;;
           esac
           # Checksum sidecar for whichever archives exist on this platform.
-          {
-            [ -f "${archive}.tar.gz" ] && sha256sum "${archive}.tar.gz"
-            [ -f "${archive}.zip" ]   && sha256sum "${archive}.zip"
-          } > "${archive}.sha256"
+          # (Each line is an `&&` list so a missing file short-circuits
+          # without tripping `set -e`; the file is pre-created so it always
+          # exists even if neither archive is produced.)
+          : > "${archive}.sha256"
+          [ -f "${archive}.tar.gz" ] && sha256sum "${archive}.tar.gz" >> "${archive}.sha256"
+          [ -f "${archive}.zip" ]   && sha256sum "${archive}.zip"   >> "${archive}.sha256"
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
