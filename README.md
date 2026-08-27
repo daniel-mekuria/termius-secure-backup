@@ -117,6 +117,59 @@ termius-backup snapshots list        # list tagged rollback snapshots
 termius-backup snapshots prune --keep 10   # keep the newest 10 per source dir
 ```
 
+### Google Drive backups
+
+Back up to — and restore from — your own Google Drive. Google only offers
+OAuth for Drive access (no email+password login), so this uses the **OAuth
+device flow**: the tool prints a short code, you approve it at
+`google.com/device` in any browser, and the resulting refresh token is
+**encrypted at rest** with a master password you choose.
+
+```sh
+termius-backup gdrive login
+# → asks for the account email (labels the backup)
+# → prints a URL + code; approve in a browser
+# → asks for a MASTER password (protects the stored Google credentials)
+# → stores encrypted creds at ~/.config/termius-secure-backup/gdrive-creds.tsb
+
+termius-backup gdrive backup --name laptop
+# → asks for the BACKUP password (encrypts the .tsb, same as local backups)
+# → creates a folder named laptop.tsbak-vault on Drive
+# → uploads a timestamped, encrypted .tsb into it
+
+termius-backup gdrive restore
+# → lists your *.tsbak-vault folders with their most recent backup date
+# → you pick a folder, then a backup
+# → downloads it, confirms, snapshots the current dir, asks the BACKUP
+#   password, decrypts — and asks once more before applying the restore
+
+termius-backup gdrive status         # show the linked account
+termius-backup gdrive logout         # delete the stored credentials
+```
+
+**Two distinct passwords** (on purpose):
+
+- **Master password** — encrypts the stored Google OAuth refresh token. Lose
+  it and you must re-run `gdrive login`.
+- **Backup password** — encrypts each `.tsb` payload, exactly like local
+  backups. It is *not* stored anywhere; re-enter it at restore time.
+
+Uploaded backups are identical `.tsb` files, so `info`, local `restore`, and
+`rollback` all work on them. `--termius-dir`, `--snapshots-dir`,
+`--password-file`, `--password-env`, `--yes`, and `--creds-file` apply to
+`gdrive backup` / `gdrive restore` as they do to the local commands.
+
+**One-time setup:** register an OAuth (desktop) client for the Drive API in
+[GCP Console](https://console.cloud.google.com/apis/credentials) and set its
+client id:
+
+```sh
+export TSBAK_GDRIVE_CLIENT_ID="1234…app…com"
+```
+
+The scope requested is `drive.file` — least privilege, covering only files
+this tool creates (the `.tsbak-vault` folders and their `.tsb` backups).
+
 ---
 
 ## How it works
@@ -180,6 +233,7 @@ source directory.
 | 4    | Container format error (bad/tampered)    |
 | 5    | Canceled by user                         |
 | 6    | I/O or internal error                    |
+| 7    | Google Drive remote error                |
 
 ---
 

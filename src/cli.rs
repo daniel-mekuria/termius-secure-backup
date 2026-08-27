@@ -31,6 +31,10 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub password_env: Option<String>,
 
+    /// Override the stored Google Drive credential path (auto-detected by default).
+    #[arg(long, global = true)]
+    pub creds_file: Option<PathBuf>,
+
     /// Skip confirmation prompts and the weak-password gate (non-interactive).
     #[arg(long, short = 'y', global = true)]
     pub yes: bool,
@@ -49,6 +53,7 @@ pub struct Globals {
     pub snapshots_dir: Option<PathBuf>,
     pub password_file: Option<PathBuf>,
     pub password_env: Option<String>,
+    pub creds_file: Option<PathBuf>,
     pub yes: bool,
 }
 
@@ -61,6 +66,7 @@ impl Globals {
             snapshots_dir: cli.snapshots_dir,
             password_file: cli.password_file,
             password_env: cli.password_env,
+            creds_file: cli.creds_file,
             yes: cli.yes,
         }
     }
@@ -78,6 +84,8 @@ pub enum Command {
     Info(InfoArgs),
     /// Manage rollback snapshots.
     Snapshots(SnapshotsArgs),
+    /// Back up and restore over Google Drive.
+    Gdrive(GdriveArgs),
 }
 
 impl Default for Command {
@@ -131,4 +139,31 @@ pub struct PruneArgs {
     /// Number of newest snapshots to keep per source directory.
     #[arg(long, default_value_t = 10)]
     pub keep: usize,
+}
+
+#[derive(Args, Debug)]
+pub struct GdriveArgs {
+    #[command(subcommand)]
+    pub action: GdriveAction,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum GdriveAction {
+    /// Log in to Google Drive (OAuth device flow) and store encrypted credentials.
+    Login,
+    /// Remove stored Google Drive credentials.
+    Logout,
+    /// Show the linked Google Drive account.
+    Status,
+    /// Back up the Termius data directory to a vault on Google Drive.
+    Backup(GdriveBackupArgs),
+    /// Restore the Termius data directory from a backup on Google Drive.
+    Restore,
+}
+
+#[derive(Args, Debug, Default)]
+pub struct GdriveBackupArgs {
+    /// Name for the backup (a `<name>.tsbak-vault` folder is created on Drive).
+    #[arg(long)]
+    pub name: Option<String>,
 }

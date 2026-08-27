@@ -119,6 +119,36 @@ pub fn ask_path(prompt: &str, suggested: &str) -> Result<String> {
     }
 }
 
+/// Read a free-text string from the user. On a TTY the user may press Enter
+/// to accept `default` (when one is given). Non-interactive sessions accept
+/// `default` if present, otherwise error.
+pub fn ask_string(prompt: &str, default: Option<&str>) -> Result<String> {
+    if io::stdin().is_terminal() {
+        eprintln!("{prompt}");
+        if let Some(d) = default {
+            eprintln!("  (press Enter to use the default: {d})");
+        }
+        let mut line = String::new();
+        io::stdin().read_line(&mut line)?;
+        let s = line.trim().to_string();
+        if s.is_empty() {
+            match default {
+                Some(d) => Ok(d.to_string()),
+                None => Err(Error::Canceled("no value given".into())),
+            }
+        } else {
+            Ok(s)
+        }
+    } else {
+        match default {
+            Some(d) => Ok(d.to_string()),
+            None => Err(Error::Canceled(
+                "non-interactive session cannot prompt; pass a value explicitly".into(),
+            )),
+        }
+    }
+}
+
 /// Present a numbered menu of options and return the chosen index.
 pub fn choose(label: &str, options: &[String]) -> Result<usize> {
     if options.is_empty() {

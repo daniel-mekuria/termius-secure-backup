@@ -17,6 +17,7 @@ pub enum ExitCode {
     BadFormat = 4,
     Canceled = 5,
     Internal = 6,
+    Remote = 7,
 }
 
 impl From<Error> for ExitCode {
@@ -32,6 +33,8 @@ impl From<Error> for ExitCode {
             | E::Integrity(_) => ExitCode::BadFormat,
             E::NotFound(_) | E::SnapshotNotFound(_) => ExitCode::NotFound,
             E::WeakPassword { .. } => ExitCode::Usage,
+            E::NotLoggedIn => ExitCode::Auth,
+            E::Gdrive(_) => ExitCode::Remote,
             E::Io(_) | E::Archive(_) | E::Json(_) | E::Other(_) => ExitCode::Internal,
         }
     }
@@ -84,6 +87,12 @@ pub enum Error {
     #[error("serialization error: {0}")]
     Json(#[from] serde_json::Error),
 
+    #[error("not logged in to Google Drive — run `termius-backup gdrive login`")]
+    NotLoggedIn,
+
+    #[error("google drive error: {0}")]
+    Gdrive(String),
+
     #[error("{0}")]
     Other(String),
 }
@@ -106,5 +115,11 @@ impl From<chacha20poly1305::aead::Error> for Error {
 impl From<Box<dyn std::error::Error + Send + Sync>> for Error {
     fn from(e: Box<dyn std::error::Error + Send + Sync>) -> Self {
         Error::Other(e.to_string())
+    }
+}
+
+impl From<ureq::Error> for Error {
+    fn from(e: ureq::Error) -> Self {
+        Error::Gdrive(e.to_string())
     }
 }

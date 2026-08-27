@@ -6,10 +6,12 @@
 use clap::Parser;
 use std::process::ExitCode;
 
-use termius_secure_backup::cli::{Cli, Command, Globals, SnapshotsAction};
+use termius_secure_backup::cli::{Cli, Command, GdriveAction, Globals, SnapshotsAction};
 use termius_secure_backup::error::ExitCode as AppExitCode;
 use termius_secure_backup::util;
-use termius_secure_backup::{backup, container, crypto, paths, restore, rollback, snapshot};
+use termius_secure_backup::{
+    backup, container, crypto, gdrive, paths, restore, rollback, snapshot,
+};
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
@@ -23,6 +25,7 @@ fn main() -> ExitCode {
         snapshots_dir,
         password_file,
         password_env,
+        creds_file,
         yes,
     } = globals;
     let g = Refs {
@@ -30,6 +33,7 @@ fn main() -> ExitCode {
         snapshots_dir,
         password_file,
         password_env,
+        creds_file,
         yes,
     };
     let result = match command {
@@ -38,6 +42,7 @@ fn main() -> ExitCode {
         Command::Rollback(a) => run_rollback(&g, a),
         Command::Info(a) => run_info(a),
         Command::Snapshots(a) => run_snapshots(&g, a.action),
+        Command::Gdrive(a) => run_gdrive(&g, a.action),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -54,6 +59,7 @@ struct Refs {
     snapshots_dir: Option<std::path::PathBuf>,
     password_file: Option<std::path::PathBuf>,
     password_env: Option<String>,
+    creds_file: Option<std::path::PathBuf>,
     yes: bool,
 }
 
@@ -69,6 +75,9 @@ impl Refs {
     }
     fn password_env(&self) -> Option<&str> {
         self.password_env.as_deref()
+    }
+    fn creds_file(&self) -> Option<&std::path::Path> {
+        self.creds_file.as_deref()
     }
 }
 
@@ -157,4 +166,36 @@ fn run_snapshots(g: &Refs, action: SnapshotsAction) -> termius_secure_backup::er
             Ok(())
         }
     }
+}
+
+fn run_gdrive(g: &Refs, action: GdriveAction) -> termius_secure_backup::error::Result<()> {
+    let creds = paths::resolve_gdrive_creds_path(g.creds_file())?;
+    match action {
+        GdriveAction::Login => gdrive::run_login(&creds)?,
+        GdriveAction::Logout => gdrive::run_logout(&creds)?,
+        GdriveAction::Status => gdrive::run_status(&creds)?,
+        GdriveAction::Backup(a) => {
+            let (vault, file_id) = gdrive::run_backup(gdrive::BackupOptions {
+                termius_dir: g.termius_dir(),
+                name: a.name.as_deref(),
+                password_file: g.password_file(),
+                password_env: g.password_env(),
+                creds_path: &creds,
+                yes: g.yes,
+            })?;
+            eprintln!("Done: backup in vault '{vault}' (Drive file {file_id})");
+        }
+        GdriveAction::Restore => {
+            let p = gdrive::run_restore(gdrive::RestoreOptions {
+                termius_dir: g.termius_dir(),
+                snapshots_dir: g.snapshots_dir(),
+                password_file: g.password_file(),
+                password_env: g.password_env(),
+                creds_path: &creds,
+                yes: g.yes,
+            })?;
+            eprintln!("Done: restored into {}", p.display());
+        }
+    }
+    Ok(())
 }

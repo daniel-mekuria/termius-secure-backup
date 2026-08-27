@@ -123,7 +123,8 @@ fn acquire_password(
 }
 
 /// Atomically replace `dest` with the contents of `staging` by renaming.
-fn replace_dir(dest: &Path, staging: &Path) -> Result<()> {
+/// `pub(crate)` so the Google Drive restore flow can reuse it.
+pub(crate) fn replace_dir(dest: &Path, staging: &Path) -> Result<()> {
     let parent = dest
         .parent()
         .ok_or_else(|| Error::Other("restore destination has no parent".into()))?;

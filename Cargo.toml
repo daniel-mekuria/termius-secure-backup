@@ -37,6 +37,7 @@ tempfile = "3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 time = { version = "0.3", features = ["formatting", "macros", "parsing"] }
+ureq = { version = "2.10", features = ["json"] }
 
 [dev-dependencies]
 assert_cmd = "2"

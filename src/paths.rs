@@ -76,6 +76,28 @@ pub fn snapshots_index_path(snapshots_dir: &Path) -> PathBuf {
     snapshots_dir.join("index.json")
 }
 
+/// The encrypted Google Drive credential store (a `.tsb` container whose
+/// plaintext is a JSON blob with the OAuth tokens). Lives in the per-user
+/// config dir so it travels with the profile, not with bulky snapshot data:
+/// `~/.config/termius-secure-backup/gdrive-creds.tsb` (Linux),
+/// `~/Library/Application Support/termius-secure-backup/gdrive-creds.tsb`
+/// (macOS), `%APPDATA%\termius-secure-backup\gdrive-creds.tsb` (Windows).
+pub fn gdrive_creds_path() -> Result<PathBuf> {
+    let base = dirs::config_dir().ok_or_else(|| {
+        Error::NotFound("could not determine the user config directory for this OS".to_string())
+    })?;
+    Ok(base.join("termius-secure-backup").join("gdrive-creds.tsb"))
+}
+
+/// Resolve the credential store path, applying an override if given. The
+/// directory need not exist yet.
+pub fn resolve_gdrive_creds_path(override_path: Option<&Path>) -> Result<PathBuf> {
+    Ok(match override_path {
+        Some(p) => p.to_path_buf(),
+        None => gdrive_creds_path()?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

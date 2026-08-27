@@ -12,6 +12,7 @@ pub mod cli;
 pub mod container;
 pub mod crypto;
 pub mod error;
+pub mod gdrive;
 pub mod paths;
 pub mod prompt;
 pub mod restore;
