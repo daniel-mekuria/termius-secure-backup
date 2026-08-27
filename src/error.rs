@@ -35,6 +35,7 @@ impl From<Error> for ExitCode {
             E::WeakPassword { .. } => ExitCode::Usage,
             E::NotLoggedIn => ExitCode::Auth,
             E::Gdrive(_) => ExitCode::Remote,
+            E::NoSubcommand => ExitCode::Usage,
             E::Io(_) | E::Archive(_) | E::Json(_) | E::Other(_) => ExitCode::Internal,
         }
     }
@@ -92,6 +93,12 @@ pub enum Error {
 
     #[error("google drive error: {0}")]
     Gdrive(String),
+
+    #[error(
+        "no subcommand and no interactive terminal for the menu — \
+         pass one of: backup, restore, rollback, info, snapshots, gdrive (see --help)"
+    )]
+    NoSubcommand,
 
     #[error("{0}")]
     Other(String),

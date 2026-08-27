@@ -20,3 +20,4 @@ pub mod rollback;
 pub mod snapshot;
 pub mod util;
 pub mod weakpass;
+pub mod wizard;

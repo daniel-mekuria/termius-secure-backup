@@ -10,7 +10,7 @@ use termius_secure_backup::cli::{Cli, Command, GdriveAction, Globals, SnapshotsA
 use termius_secure_backup::error::ExitCode as AppExitCode;
 use termius_secure_backup::util;
 use termius_secure_backup::{
-    backup, container, crypto, gdrive, paths, restore, rollback, snapshot,
+    backup, container, crypto, gdrive, paths, restore, rollback, snapshot, wizard,
 };
 
 fn main() -> ExitCode {
@@ -37,12 +37,13 @@ fn main() -> ExitCode {
         yes,
     };
     let result = match command {
-        Command::Backup(a) => run_backup(&g, a),
-        Command::Restore(a) => run_restore(&g, a),
-        Command::Rollback(a) => run_rollback(&g, a),
-        Command::Info(a) => run_info(a),
-        Command::Snapshots(a) => run_snapshots(&g, a.action),
-        Command::Gdrive(a) => run_gdrive(&g, a.action),
+        Some(Command::Backup(a)) => run_backup(&g, a),
+        Some(Command::Restore(a)) => run_restore(&g, a),
+        Some(Command::Rollback(a)) => run_rollback(&g, a),
+        Some(Command::Info(a)) => run_info(a),
+        Some(Command::Snapshots(a)) => run_snapshots(&g, a.action),
+        Some(Command::Gdrive(a)) => run_gdrive(&g, a.action),
+        None => run_wizard(&g),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -79,6 +80,18 @@ impl Refs {
     fn creds_file(&self) -> Option<&std::path::Path> {
         self.creds_file.as_deref()
     }
+}
+
+/// No subcommand: run the interactive menu (backup/restore × local/gdrive).
+fn run_wizard(g: &Refs) -> termius_secure_backup::error::Result<()> {
+    wizard::run(&wizard::Flags {
+        termius_dir: g.termius_dir(),
+        snapshots_dir: g.snapshots_dir(),
+        password_file: g.password_file(),
+        password_env: g.password_env(),
+        creds_file: g.creds_file(),
+        yes: g.yes,
+    })
 }
 
 fn run_backup(

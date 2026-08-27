@@ -66,6 +66,30 @@ and put it on your `PATH`.
 
 ## Usage
 
+### Interactive mode (no subcommand)
+
+Run `termius-backup` with **no arguments** on a terminal and it walks you
+through a two-page menu:
+
+```
+What would you like to do?
+  [1] Backup
+  [2] Restore
+Back up to where?
+  [1] Local file
+  [2] Google Drive
+```
+
+- **Local** → asks for the output (backup) or input (restore) file path, then
+  the password — the same flow as the `backup`/`restore` commands.
+- **Google Drive** → runs the login flow if you are not logged in yet; if you
+  are, it asks for your master password, then continues (vault name + backup
+  password for backup, vault/backup selection for restore).
+
+All global flags (`--termius-dir`, `--password-file`, …) still apply. In a
+non-interactive session (no TTY) a bare invocation is a usage error — pass a
+subcommand there.
+
 ### Back up
 
 ```sh

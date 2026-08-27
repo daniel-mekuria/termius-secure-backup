@@ -816,6 +816,11 @@ pub struct BackupOptions<'a> {
 pub fn run_backup(opts: BackupOptions<'_>) -> Result<(String, String)> {
     let src = paths::resolve_termius_dir(opts.termius_dir)?;
 
+    // Unlock the stored Google credentials first (asks for the master
+    // password when already logged in) so a wrong master fails fast, before
+    // any backup work.
+    let mut session = open_session(opts.creds_path)?;
+
     let name = match opts.name {
         Some(n) if !n.trim().is_empty() => n.trim().to_string(),
         _ => prompt::ask_string(
@@ -843,7 +848,6 @@ pub fn run_backup(opts: BackupOptions<'_>) -> Result<(String, String)> {
         unsafe { std::ptr::write_volatile(b, 0) };
     }
 
-    let mut session = open_session(opts.creds_path)?;
     let folder_id = session.ensure_vault(&name)?;
     let file_id = session.upload_file(&folder_id, &file_name, &tsb)?;
     eprintln!("Uploaded {file_name} to vault '{vault_name}' (Drive file id {file_id}).");

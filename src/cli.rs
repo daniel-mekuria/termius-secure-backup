@@ -45,10 +45,10 @@ pub struct Cli {
 }
 
 /// Owned global flags extracted from a parsed [`Cli`], plus the selected
-/// subcommand. The per-command args are moved out while the shared flags
-/// remain available as owned locals for the duration of a command.
+/// subcommand (if any). `command: None` means the tool was run bare, which
+/// triggers the interactive wizard on a TTY.
 pub struct Globals {
-    pub command: Command,
+    pub command: Option<Command>,
     pub termius_dir: Option<PathBuf>,
     pub snapshots_dir: Option<PathBuf>,
     pub password_file: Option<PathBuf>,
@@ -61,7 +61,7 @@ impl Globals {
     /// Consume a parsed [`Cli`] and split it into globals + subcommand.
     pub fn from_cli(cli: Cli) -> Self {
         Globals {
-            command: cli.command.unwrap_or_default(),
+            command: cli.command,
             termius_dir: cli.termius_dir,
             snapshots_dir: cli.snapshots_dir,
             password_file: cli.password_file,
@@ -86,12 +86,6 @@ pub enum Command {
     Snapshots(SnapshotsArgs),
     /// Back up and restore over Google Drive.
     Gdrive(GdriveArgs),
-}
-
-impl Default for Command {
-    fn default() -> Self {
-        Command::Backup(BackupArgs::default())
-    }
 }
 
 #[derive(Args, Debug, Default)]
