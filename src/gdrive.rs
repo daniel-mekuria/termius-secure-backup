@@ -157,9 +157,24 @@ pub struct OAuthTokens {
 }
 
 fn post_form(url: &str, body: &str) -> Result<ureq::Response> {
-    Ok(ureq::post(url)
+    match ureq::post(url)
         .set("Content-Type", "application/x-www-form-urlencoded")
-        .send_string(body)?)
+        .send_string(body)
+    {
+        Ok(resp) => Ok(resp),
+        // Surface Google's error body (e.g. "invalid_client: Invalid client
+        // type.") instead of a bare status code.
+        Err(ureq::Error::Status(code, resp)) => {
+            let detail = resp.into_string().unwrap_or_default();
+            let detail = detail.trim();
+            Err(Error::Gdrive(if detail.is_empty() {
+                format!("{url}: status code {code}")
+            } else {
+                format!("{url}: status code {code} — {detail}")
+            }))
+        }
+        Err(e) => Err(Error::Gdrive(e.to_string())),
+    }
 }
 
 fn token_error(resp: &TokenResp) -> Result<()> {
