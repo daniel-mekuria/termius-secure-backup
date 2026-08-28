@@ -221,7 +221,17 @@ minutes:
 The client id is **not a secret** — it is an identifier (like a username)
 that the tool sends to Google's login page, so keeping it in a shell rc is
 fine. The *client secret* the console may display for a desktop client is
-**not needed** — this tool's login flows use PKCE, not the secret.
+normally **not needed** — this tool's login flows use PKCE, not the
+secret. If your client is configured as *confidential* (Google's token
+endpoint answers `client_secret is missing`), set its secret as well:
+
+```sh
+export TSBAK_GDRIVE_CLIENT_SECRET="GOCSPX-…"
+```
+
+The secret, when present, is stored in the same encrypted credential blob
+as the refresh token — protected by your master password, not kept in a
+shell variable after `gdrive login`.
 
 > ⚠️ **New clients can take a while to activate.** The console itself
 > warns that "it may take five minutes to a few hours for settings to

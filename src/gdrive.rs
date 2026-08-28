@@ -67,6 +67,23 @@ pub fn client_id() -> Result<String> {
     ))
 }
 
+/// Optional OAuth client secret (env `TSBAK_GDRIVE_CLIENT_SECRET`). Public
+/// desktop clients don't need one (login flows use PKCE); confidential
+/// clients require it at Google's token endpoint.
+pub fn client_secret() -> Option<String> {
+    std::env::var("TSBAK_GDRIVE_CLIENT_SECRET")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+/// Append `&client_secret=…` to a urlencoded body when a secret is set.
+fn push_client_secret(body: &mut String, client_secret: Option<&str>) {
+    if let Some(s) = client_secret.filter(|s| !s.is_empty()) {
+        body.push_str(&format!("&client_secret={}", url_encode(s)));
+    }
+}
+
 /// Folder name for a user-chosen vault: `<name>.tsbak-vault`.
 pub fn vault_folder_name(name: &str) -> String {
     format!("{name}{VAULT_TAG}")
@@ -82,6 +99,11 @@ pub fn vault_folder_name(name: &str) -> String {
 pub struct Creds {
     pub email: String,
     pub client_id: String,
+    /// Optional OAuth client secret. Public desktop clients don't need one
+    /// (the login flows use PKCE); confidential clients require it at
+    /// Google's token endpoint.
+    #[serde(default)]
+    pub client_secret: Option<String>,
     pub refresh_token: String,
     #[serde(default)]
     pub access_token: String,
@@ -206,7 +228,7 @@ fn url_encode(s: &str) -> String {
 
 /// Run the OAuth2 device flow: print the user code, poll until the user
 /// authorizes, and return the token pair.
-pub fn device_flow(client_id: &str) -> Result<OAuthTokens> {
+pub fn device_flow(client_id: &str, client_secret: Option<&str>) -> Result<OAuthTokens> {
     let body = format!(
         "client_id={}&scope={}&access_type=offline&prompt=consent",
         url_encode(client_id),
@@ -230,11 +252,12 @@ pub fn device_flow(client_id: &str) -> Result<OAuthTokens> {
             ));
         }
         std::thread::sleep(std::time::Duration::from_secs(interval_secs));
-        let body = format!(
+        let mut body = format!(
             "client_id={}&grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code={}",
             url_encode(client_id),
             url_encode(&resp.device_code)
         );
+        push_client_secret(&mut body, client_secret);
         let tresp: TokenResp = post_form(TOKEN_URL, &body)?
             .into_json()
             .map_err(|e| Error::Gdrive(e.to_string()))?;
@@ -275,12 +298,17 @@ pub fn device_flow(client_id: &str) -> Result<OAuthTokens> {
 }
 
 /// Exchange a refresh token for a fresh access token.
-pub fn refresh_access_token(client_id: &str, refresh_token: &str) -> Result<(String, i64)> {
-    let body = format!(
+pub fn refresh_access_token(
+    client_id: &str,
+    client_secret: Option<&str>,
+    refresh_token: &str,
+) -> Result<(String, i64)> {
+    let mut body = format!(
         "client_id={}&grant_type=refresh_token&refresh_token={}",
         url_encode(client_id),
         url_encode(refresh_token)
     );
+    push_client_secret(&mut body, client_secret);
     let tresp: TokenResp = post_form(TOKEN_URL, &body)?
         .into_json()
         .map_err(|e| Error::Gdrive(e.to_string()))?;
@@ -490,7 +518,7 @@ fn accept_callback(listener: &std::net::TcpListener, state: &str) -> Result<Stri
 
 /// Authorization-code flow with PKCE and a loopback redirect. Returns the
 /// token pair on success.
-pub fn auth_code_loopback(client_id: &str) -> Result<OAuthTokens> {
+pub fn auth_code_loopback(client_id: &str, client_secret: Option<&str>) -> Result<OAuthTokens> {
     let verifier = pkce_verifier();
     let state = random_hex(16);
     let listener = std::net::TcpListener::bind("127.0.0.1:0")
@@ -515,13 +543,14 @@ pub fn auth_code_loopback(client_id: &str) -> Result<OAuthTokens> {
     eprintln!("Then return to this terminal.");
     let _opened = open_browser(&url);
     let code = accept_callback(&listener, &state)?;
-    let body = format!(
+    let mut body = format!(
         "client_id={}&grant_type=authorization_code&code={}&redirect_uri={}&code_verifier={}",
         url_encode(client_id),
         url_encode(&code),
         url_encode(&redirect_uri),
         url_encode(&verifier),
     );
+    push_client_secret(&mut body, client_secret);
     let tresp: TokenResp = post_form(TOKEN_URL, &body)?
         .into_json()
         .map_err(|e| Error::Gdrive(e.to_string()))?;
@@ -953,7 +982,11 @@ impl Session {
         if creds.token_expired() {
             let client_id = client_id()?;
             eprintln!("Refreshing Google access token …");
-            let (at, exp) = refresh_access_token(&client_id, &creds.refresh_token)?;
+            let (at, exp) = refresh_access_token(
+                &client_id,
+                creds.client_secret.as_deref(),
+                &creds.refresh_token,
+            )?;
             creds.access_token = at;
             creds.expires_at = exp;
             save_creds(creds_path, master_password, &creds)?;
@@ -1012,14 +1045,15 @@ pub fn run_login(creds_path: &Path) -> Result<()> {
         return Err(Error::Canceled("login canceled".into()));
     }
     let client_id = client_id()?;
+    let client_secret = client_secret();
     let email = prompt::ask_string("Google Drive account email (labels this backup):", None)?;
-    let tokens = match device_flow(&client_id) {
+    let tokens = match device_flow(&client_id, client_secret.as_deref()) {
         Ok(t) => t,
         Err(e) if device_flow_unavailable(&e) => {
             eprintln!();
             eprintln!("Google did not offer the device flow for this client, so");
             eprintln!("falling back to browser login (loopback redirect).");
-            auth_code_loopback(&client_id)?
+            auth_code_loopback(&client_id, client_secret.as_deref())?
         }
         Err(e) => return Err(e),
     };
@@ -1027,6 +1061,7 @@ pub fn run_login(creds_path: &Path) -> Result<()> {
     let creds = Creds {
         email,
         client_id,
+        client_secret,
         refresh_token: tokens.refresh_token,
         access_token: tokens.access_token,
         expires_at: tokens.expires_at,
@@ -1300,6 +1335,7 @@ mod tests {
         Creds {
             email: email.into(),
             client_id: "test-client".into(),
+            client_secret: None,
             refresh_token: "rt".into(),
             access_token: "at".into(),
             expires_at: util::current_time().unix_timestamp() + 3600,
@@ -1501,5 +1537,36 @@ mod tests {
             "network timeout".into()
         )));
         assert!(!device_flow_unavailable(&Error::NotLoggedIn));
+    }
+
+    #[test]
+    fn push_client_secret_appends_only_when_set() {
+        let mut a = String::from("x=1");
+        push_client_secret(&mut a, Some("sec ret"));
+        assert_eq!(a, "x=1&client_secret=sec%20ret");
+        let mut b = String::from("x=1");
+        push_client_secret(&mut b, None);
+        push_client_secret(&mut b, Some(""));
+        assert_eq!(b, "x=1");
+    }
+
+    #[test]
+    fn creds_roundtrip_preserves_optional_secret() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.tsb");
+        let mut c = creds("a@b.c");
+        c.client_secret = Some("GOCSPX-test".into());
+        save_creds_fast(&path, b"pw", &c).unwrap();
+        assert_eq!(
+            load_creds_fast(&path, b"pw")
+                .unwrap()
+                .client_secret
+                .as_deref(),
+            Some("GOCSPX-test")
+        );
+        // No secret: the field deserializes to None (backwards compatible).
+        let c2 = creds("a@b.c");
+        save_creds_fast(&path, b"pw", &c2).unwrap();
+        assert_eq!(load_creds_fast(&path, b"pw").unwrap().client_secret, None);
     }
 }
