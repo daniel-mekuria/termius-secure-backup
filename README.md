@@ -144,10 +144,13 @@ termius-backup snapshots prune --keep 10   # keep the newest 10 per source dir
 ### Google Drive backups
 
 Back up to — and restore from — your own Google Drive. Google only offers
-OAuth for Drive access (no email+password login), so this uses the **OAuth
-device flow**: the tool prints a short code, you approve it at
-`google.com/device` in any browser, and the resulting refresh token is
-**encrypted at rest** with a master password you choose.
+OAuth for Drive access (no email+password login), so this uses **OAuth2**:
+the tool prints a short code you approve at `google.com/device` (device
+flow) — and if Google does not offer the device flow for the configured
+client, it automatically falls back to **browser login**: it opens the
+consent page and catches the redirect on a local loopback address
+(authorization code + PKCE). The resulting refresh token is **encrypted at
+rest** with a master password you choose.
 
 ```sh
 termius-backup gdrive login

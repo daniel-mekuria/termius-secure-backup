@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Google Drive remote backup: OAuth2 device-flow login with credentials
+//! Google Drive remote backup: OAuth2 login (device flow, falling back to
+//! authorization-code + PKCE on a loopback redirect) with credentials
 //! encrypted at rest, a thin Drive v3 REST client, and backup/restore
 //! orchestration on top of the existing `.tsb` container.
 //!
@@ -9,9 +10,10 @@
 //! - **Backup password** — encrypts each `.tsb` (prompted per backup/restore,
 //!   identical to the local flow).
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+use base64::Engine;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
@@ -33,6 +35,7 @@ pub const GDRIVE_SCOPE: &str = "https://www.googleapis.com/auth/drive.file";
 pub const VAULT_TAG: &str = ".tsbak-vault";
 const FOLDER_MIME: &str = "application/vnd.google-apps.folder";
 const DEVICE_CODE_URL: &str = "https://oauth2.googleapis.com/device/code";
+const AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const DRIVE_API: &str = "https://www.googleapis.com/drive/v3";
 const UPLOAD_API: &str = "https://www.googleapis.com/upload/drive/v3/files";
@@ -290,6 +293,257 @@ pub fn refresh_access_token(client_id: &str, refresh_token: &str) -> Result<(Str
     let expires_at =
         util::current_time().unix_timestamp() + tresp.expires_in.unwrap_or(3600) as i64;
     Ok((access, expires_at))
+}
+
+// ---------------------------------------------------------------------------
+// Authorization-code flow (loopback redirect, PKCE)
+//
+// Fallback for clients where the device flow is not offered (Google
+// answers `invalid_client` to /device/code). This is the standard desktop
+// login used by gcloud/gh: bind a one-shot listener on 127.0.0.1, open the
+// browser to the consent URL, catch the redirect, and exchange the code.
+// ---------------------------------------------------------------------------
+
+/// Page the callback listener sends back to the browser.
+const CALLBACK_PAGE: &str = "<!doctype html><html><head><meta charset=\"utf-8\">
+<title>termius-backup</title></head>
+<body style=\"font-family:sans-serif;text-align:center;margin-top:4em\">
+<h2>\u{2713} Authorized</h2>
+<p>Google access for <b>termius-backup</b> is complete. You can close this
+window and return to the terminal.</p>
+</body></html>";
+
+/// True when a device-flow error means the device flow itself is not
+/// offered for this client (a 401 `invalid_client`), as opposed to a
+/// network or user-side failure.
+fn device_flow_unavailable(e: &Error) -> bool {
+    matches!(e, Error::Gdrive(m) if m.contains("invalid_client"))
+}
+
+/// base64url (no padding), for PKCE values.
+fn base64url(data: &[u8]) -> String {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(data)
+}
+
+/// PKCE code verifier: 32 random bytes, base64url-encoded (43 chars —
+/// within the RFC 7636 43–128 range).
+fn pkce_verifier() -> String {
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    base64url(&bytes)
+}
+
+/// PKCE `S256` code challenge: BASE64URL(SHA-256(verifier)).
+pub(crate) fn pkce_challenge(verifier: &str) -> String {
+    use sha2::{Digest, Sha256};
+    base64url(&Sha256::digest(verifier.as_bytes()))
+}
+
+/// `n` random bytes as lowercase hex (for the `state` parameter).
+fn random_hex(n: usize) -> String {
+    let mut bytes = vec![0u8; n];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Percent-decode a query-string component.
+fn url_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(h), Some(l)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
+                out.push(h * 16 + l);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Parse the OAuth2 callback query: surface `error=…` if present, verify
+/// `state`, and return the authorization `code`.
+pub(crate) fn parse_callback(query: &str, expected_state: &str) -> Result<String> {
+    let mut code: Option<String> = None;
+    let mut state: Option<String> = None;
+    let mut err: Option<String> = None;
+    let mut err_desc: Option<String> = None;
+    for pair in query.split('&') {
+        let (k, v) = match pair.split_once('=') {
+            Some(p) => p,
+            None => continue,
+        };
+        match url_decode(k).as_str() {
+            "code" => code = Some(url_decode(v)),
+            "state" => state = Some(url_decode(v)),
+            "error" => err = Some(url_decode(v)),
+            "error_description" => err_desc = Some(url_decode(v)),
+            _ => {}
+        }
+    }
+    if let Some(err) = err {
+        return Err(Error::Gdrive(format!(
+            "browser login failed: {err} {}",
+            err_desc.unwrap_or_default()
+        )));
+    }
+    let state =
+        state.ok_or_else(|| Error::Gdrive("callback missing the state parameter".into()))?;
+    if state != expected_state {
+        return Err(Error::Gdrive(
+            "callback state mismatch; login failed".into(),
+        ));
+    }
+    match code {
+        Some(c) if !c.is_empty() => Ok(c),
+        _ => Err(Error::Gdrive("callback missing the code parameter".into())),
+    }
+}
+
+/// Best-effort: open `url` in the user's default browser.
+fn open_browser(url: &str) -> bool {
+    let (prog, args): (&str, &[&str]) = if cfg!(target_os = "macos") {
+        ("open", &[url])
+    } else if cfg!(target_os = "windows") {
+        ("cmd", &["/C", "start", "", url])
+    } else {
+        ("xdg-open", &[url])
+    };
+    std::process::Command::new(prog)
+        .args(args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .is_ok()
+}
+
+/// Wait for the browser's redirect on the loopback listener and return the
+/// authorization `code`. Answers the request with a small "you can close
+/// this window" page. Times out after 10 minutes.
+fn accept_callback(listener: &std::net::TcpListener, state: &str) -> Result<String> {
+    listener
+        .set_nonblocking(true)
+        .map_err(|e| Error::Gdrive(format!("callback listener: {e}")))?;
+    let deadline = util::current_time() + time::Duration::seconds(600);
+    let (mut stream, _addr) = loop {
+        match listener.accept() {
+            Ok(s) => break s,
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if util::current_time() >= deadline {
+                    return Err(Error::Gdrive(
+                        "timed out waiting for the browser redirect; run login again".into(),
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            Err(e) => return Err(Error::Gdrive(format!("callback listener: {e}"))),
+        }
+    };
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+    // We only need the request line; read until the first CRLF.
+    let mut buf = [0u8; 16_384];
+    let mut total = 0usize;
+    while total < buf.len() {
+        let n = stream
+            .read(&mut buf[total..])
+            .map_err(|e| Error::Gdrive(format!("callback read: {e}")))?;
+        if n == 0 {
+            break;
+        }
+        total += n;
+        if total >= 2 && &buf[total - 2..total] == b"\r\n" {
+            break;
+        }
+    }
+    let req = String::from_utf8_lossy(&buf[..total]);
+    let query = req
+        .lines()
+        .next()
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|p| p.strip_prefix('/'))
+        .and_then(|p| p.split_once('?'))
+        .map(|(_, q)| q)
+        .ok_or_else(|| Error::Gdrive("callback request had no query string".into()))?;
+    let code = parse_callback(query, state)?;
+    let reply = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\
+         \r\nConnection: close\r\n\r\n{CALLBACK_PAGE}",
+        CALLBACK_PAGE.len()
+    );
+    let _ = stream.write_all(reply.as_bytes());
+    let _ = stream.flush();
+    Ok(code)
+}
+
+/// Authorization-code flow with PKCE and a loopback redirect. Returns the
+/// token pair on success.
+pub fn auth_code_loopback(client_id: &str) -> Result<OAuthTokens> {
+    let verifier = pkce_verifier();
+    let state = random_hex(16);
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")
+        .map_err(|e| Error::Gdrive(format!("could not bind a loopback callback listener: {e}")))?;
+    let port = listener
+        .local_addr()
+        .map_err(|e| Error::Gdrive(format!("callback listener: {e}")))?
+        .port();
+    let redirect_uri = format!("http://127.0.0.1:{port}/");
+    let url = format!(
+        "{AUTH_URL}?client_id={}&redirect_uri={}&response_type=code&scope={}&access_type=offline\
+         &prompt=consent&state={}&code_challenge={}&code_challenge_method=S256",
+        url_encode(client_id),
+        url_encode(&redirect_uri),
+        url_encode(GDRIVE_SCOPE),
+        state,
+        url_encode(&pkce_challenge(&verifier)),
+    );
+    eprintln!("A browser window will open to authorize this tool.");
+    eprintln!("If none opens, visit this URL manually:");
+    eprintln!("  {url}");
+    eprintln!("Then return to this terminal.");
+    let _opened = open_browser(&url);
+    let code = accept_callback(&listener, &state)?;
+    let body = format!(
+        "client_id={}&grant_type=authorization_code&code={}&redirect_uri={}&code_verifier={}",
+        url_encode(client_id),
+        url_encode(&code),
+        url_encode(&redirect_uri),
+        url_encode(&verifier),
+    );
+    let tresp: TokenResp = post_form(TOKEN_URL, &body)?
+        .into_json()
+        .map_err(|e| Error::Gdrive(e.to_string()))?;
+    token_error(&tresp)?;
+    let refresh = tresp
+        .refresh_token
+        .clone()
+        .ok_or_else(|| Error::Gdrive("google did not return a refresh token".into()))?;
+    let access = if tresp.access_token.is_empty() {
+        return Err(Error::Gdrive(
+            "google did not return an access token".into(),
+        ));
+    } else {
+        tresp.access_token.clone()
+    };
+    let expires_at =
+        util::current_time().unix_timestamp() + tresp.expires_in.unwrap_or(3600) as i64;
+    Ok(OAuthTokens {
+        access_token: access,
+        refresh_token: refresh,
+        expires_at,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -759,7 +1013,16 @@ pub fn run_login(creds_path: &Path) -> Result<()> {
     }
     let client_id = client_id()?;
     let email = prompt::ask_string("Google Drive account email (labels this backup):", None)?;
-    let tokens = device_flow(&client_id)?;
+    let tokens = match device_flow(&client_id) {
+        Ok(t) => t,
+        Err(e) if device_flow_unavailable(&e) => {
+            eprintln!();
+            eprintln!("Google did not offer the device flow for this client, so");
+            eprintln!("falling back to browser login (loopback redirect).");
+            auth_code_loopback(&client_id)?
+        }
+        Err(e) => return Err(e),
+    };
     let master = prompt::ask_password("master password (Google Drive credentials)", true, false)?;
     let creds = Creds {
         email,
@@ -1167,5 +1430,76 @@ mod tests {
         assert!(read_and_decrypt_bytes(&data, b"nope").is_err());
         let pt = read_and_decrypt_bytes(&data, b"backup-pw-9").unwrap();
         assert_eq!(pt, payload);
+    }
+
+    // --- authorization-code / loopback flow -------------------------------
+
+    #[test]
+    fn pkce_challenge_matches_rfc7636_vector() {
+        // RFC 7636 §Appendix-B test vector (cross-checked with openssl).
+        assert_eq!(
+            pkce_challenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
+            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+        );
+    }
+
+    #[test]
+    fn pkce_verifier_is_in_rfc7636_length_range() {
+        let v = pkce_verifier();
+        assert!((43..=128).contains(&v.len()));
+        assert!(v
+            .bytes()
+            .all(|b| matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_')));
+    }
+
+    #[test]
+    fn parse_callback_extracts_code_and_percent_decodes() {
+        let q = "code=4%2FAbCdEfG-HiJk&state=00112233445566778899aabbccddeeff\
+                 &scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fdrive.file";
+        let code = parse_callback(q, "00112233445566778899aabbccddeeff").unwrap();
+        assert_eq!(code, "4/AbCdEfG-HiJk");
+    }
+
+    #[test]
+    fn parse_callback_rejects_state_mismatch() {
+        assert!(parse_callback("code=abc&state=other", "expected").is_err());
+    }
+
+    #[test]
+    fn parse_callback_rejects_missing_code() {
+        assert!(parse_callback("state=expected", "expected").is_err());
+    }
+
+    #[test]
+    fn parse_callback_surfaces_google_error() {
+        let e = parse_callback(
+            "error=access_denied&error_description=The+user+denied&state=expected",
+            "expected",
+        )
+        .unwrap_err();
+        let msg = e.to_string();
+        assert!(msg.contains("access_denied"), "{msg}");
+    }
+
+    #[test]
+    fn device_flow_unavailable_detects_invalid_client() {
+        let not_found = Error::Gdrive(
+            "https://oauth2.googleapis.com/device/code: status code 401 — \
+             {\"error\": \"invalid_client\", \"error_description\": \
+             \"The OAuth client was not found.\"}"
+                .into(),
+        );
+        let bad_type = Error::Gdrive(
+            "https://oauth2.googleapis.com/device/code: status code 401 — \
+             {\"error\": \"invalid_client\", \"error_description\": \
+             \"Invalid client type.\"}"
+                .into(),
+        );
+        assert!(device_flow_unavailable(&not_found));
+        assert!(device_flow_unavailable(&bad_type));
+        assert!(!device_flow_unavailable(&Error::Gdrive(
+            "network timeout".into()
+        )));
+        assert!(!device_flow_unavailable(&Error::NotLoggedIn));
     }
 }
