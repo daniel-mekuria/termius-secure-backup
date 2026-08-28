@@ -186,13 +186,57 @@ Uploaded backups are identical `.tsb` files, so `info`, local `restore`, and
 `--password-file`, `--password-env`, `--yes`, and `--creds-file` apply to
 `gdrive backup` / `gdrive restore` as they do to the local commands.
 
-**One-time setup:** register an OAuth (desktop) client for the Drive API in
-[GCP Console](https://console.cloud.google.com/apis/credentials) and set its
-client id:
+### One-time setup: using your own Google OAuth client
 
-```sh
-export TSBAK_GDRIVE_CLIENT_ID="1234…app…com"
-```
+Google requires every app that signs in to Drive to present its own
+**OAuth client id**, so there is none baked into this tool — you register
+one in your own (free) Google Cloud project, and all of the OAuth consent
+and account data stays under your own Google account. It takes a few
+minutes:
+
+1. **Create a project.** Open the
+   [Google Cloud Console](https://console.cloud.google.com) and create a
+   project (any name).
+2. **Enable the Drive API.** In *APIs & Services → Library*, find
+   **Google Drive API** and enable it.
+3. **Configure the consent screen.** In *APIs & Services → OAuth consent
+   screen* (the new console calls this *Google Auth Platform*), choose
+   **External** user type and give the app a name (e.g. `termius-backup`).
+   If only you will use it, leave it in **Testing** and add your own
+   account as a *test user* — in that mode Google refresh tokens expire
+   after 7 days, so **Publish** the app if you want the login to last.
+4. **Create the client.** In *APIs & Services → Credentials → Create
+   credentials → OAuth client ID*, pick application type **Desktop app**
+   and give it a name.
+5. **Export the client id** (it looks like
+   `123456789012-abcdefg.apps.googleusercontent.com`):
+
+   ```sh
+   export TSBAK_GDRIVE_CLIENT_ID="123456789012-abcdefg.apps.googleusercontent.com"
+   ```
+
+   Add the `export` to your shell rc (`~/.bashrc`, `~/.zshrc`, …) to make
+   it permanent.
+
+The client id is **not a secret** — it is an identifier (like a username)
+that the tool sends to Google's login page, so keeping it in a shell rc is
+fine. The *client secret* the console may display for a desktop client is
+**not needed** — this tool's login flows use PKCE, not the secret.
+
+> ⚠️ **New clients can take a while to activate.** The console itself
+> warns that "it may take five minutes to a few hours for settings to
+> take effect". Until your client is live, `gdrive login` reports
+> `The OAuth client was not found` — just wait and re-run it.
+
+**How `gdrive login` uses your client id.** It first tries the OAuth
+**device flow** — a short code you approve at `google.com/device`, which
+works well over SSH. Some Google clients are not eligible for the device
+flow; when Google rejects it with `invalid_client`, the tool
+automatically falls back to **browser login** (authorization-code flow
+with PKCE): it opens the consent page in your browser and catches the
+redirect on a local loopback address (`http://127.0.0.1:<port>`), the
+same scheme `gh` and `gcloud` use. Either way the result is a refresh
+token, which is then encrypted at rest with your master password.
 
 The scope requested is `drive.file` — least privilege, covering only files
 this tool creates (the `.tsbak-vault` folders and their `.tsb` backups).
