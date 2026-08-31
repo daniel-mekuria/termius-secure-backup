@@ -7,8 +7,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-31
+
 ### Added
-- Initial release of `termius-backup`.
+- `gdrive` subcommand for Google Drive backups:
+  - `gdrive login` — links your Google account via the OAuth device flow
+    (short code approved at `google.com/device`); when Google rejects the
+    device flow for your client, it automatically falls back to browser
+    login (authorization code + PKCE on a local loopback address). The
+    refresh token is stored at
+    `~/.config/termius-secure-backup/gdrive-creds.tsb`, **encrypted at
+    rest with a master password** you choose.
+  - `gdrive backup [--name N]` — encrypts the Termius directory (same
+    Argon2id + XChaCha20-Poly1305 `.tsb` format) with a backup password
+    and uploads a timestamped copy into a `<name>.tsbak-vault` folder on
+    your Drive.
+  - `gdrive restore` — lists your `.tsbak-vault` folders and their
+    backups (newest first), downloads the chosen one, takes a pre-restore
+    snapshot, decrypts, and restores.
+  - `gdrive status` / `gdrive logout`.
+- New `TSBAK_GDRIVE_CLIENT_ID` / `TSBAK_GDRIVE_CLIENT_SECRET` environment
+  variables: register a free desktop OAuth client in your own Google
+  Cloud project (step-by-step guide in the README); the secret is only
+  needed for confidential clients and is stored in the encrypted
+  credential blob, not in the shell.
+- Interactive two-page wizard when the tool is run with no subcommand on
+  a TTY: choose Backup/Restore, then Local file/Google Drive.
+- New exit code `7` for Google Drive remote errors (documented in the
+  README).
+
+### Changed
+- `gdrive login` now prints the consent URL and **waits for Enter**
+  before opening the browser, so you can copy the URL elsewhere or open
+  it on your cue; non-TTY sessions never auto-launch a browser.
+- Weak-password detection now uses the **zxcvbn** library (dictionary,
+  keyboard-pattern, sequence, date, and leetspeak analysis). The
+  re-confirmation gate and the non-interactive warning show zxcvbn's
+  concrete explanation (e.g. "This is a top-10 common password. Add
+  another word or two."). A password is accepted without
+  re-confirmation only if it is at least 12 characters **and** resists
+  10^8 offline guesses (zxcvbn score ≥ 3, the library's own documented
+  floor).
+- All error messages are now plain language for the person reading the
+  terminal: raw OS codes such as "No such file or directory (os error 2)"
+  are translated, and `.tsb` read/write failures name the file involved
+  (missing files report "backup file not found: \<path\>"). The
+  `thiserror` dependency was dropped in favor of a manual `Display`
+  impl.
+- When the auto-detected Termius data directory is missing (sandboxed
+  Mac App Store / Snap builds, or Termius not launched yet), an
+  interactive run **asks for the real path** (with `~` expansion, and a
+  "use it anyway" confirm for not-yet-existing restore targets) instead
+  of failing outright; non-interactive runs get the `--termius-dir`
+  hint.
+- Google API/OAuth error bodies are surfaced verbatim in error messages
+  (e.g. "client was not found" while a new client activates).
+
+### Fixed
+- First `gdrive login` on a fresh machine failed with "I/O error: No
+  such file or directory (os error 2)": `~/.config/termius-secure-backup/`
+  did not exist yet. The tool now creates the parent directory of any
+  `.tsb` file it writes.
+
+## [0.1.0] - 2026-08-24
+
+Initial release.
+
 - `backup` command: packs the local Termius data directory into an
   encrypted `.tsb` file (Argon2id + XChaCha20-Poly1305).
 - `restore` command: decrypts a `.tsb` file and restores the Termius
@@ -21,7 +85,3 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Weak-password detection with re-confirmation gate.
 - Non-interactive modes via `--password-file`, `--password-env`, `--yes`.
 - Cross-platform support for macOS, Windows, and Linux.
-
-## [0.1.0] - 2026-08-24
-
-Initial release.
