@@ -672,11 +672,27 @@ fn parse_rfc3339(s: &str) -> Option<time::OffsetDateTime> {
 /// The real Drive v3 REST client.
 pub struct HttpGdriveClient {
     access_token: String,
+    drive_api: String,
+    upload_api: String,
 }
 
 impl HttpGdriveClient {
     pub fn new(access_token: String) -> Self {
-        HttpGdriveClient { access_token }
+        HttpGdriveClient {
+            access_token,
+            drive_api: DRIVE_API.to_string(),
+            upload_api: UPLOAD_API.to_string(),
+        }
+    }
+
+    /// Same client pointed at different base URLs (test fake).
+    #[cfg(test)]
+    pub fn with_base(access_token: String, drive_api: &str, upload_api: &str) -> Self {
+        HttpGdriveClient {
+            access_token,
+            drive_api: drive_api.to_string(),
+            upload_api: upload_api.to_string(),
+        }
     }
 
     fn authed(&self, req: ureq::Request) -> ureq::Request {
@@ -687,7 +703,8 @@ impl HttpGdriveClient {
         let q = url_encode(&format!("'{folder_id}' in parents and trashed=false"));
         let resp = self
             .authed(ureq::get(&format!(
-                "{DRIVE_API}/files?q={q}&pageSize=1000&fields=files(id,name,mimeType,size,createdTime)"
+                "{}/files?q={q}&pageSize=1000&fields=files(id,name,mimeType,size,createdTime)",
+                self.drive_api
             )))
             .call()?;
         let fl: FileList = resp.into_json().map_err(|e| Error::Gdrive(e.to_string()))?;
@@ -702,7 +719,8 @@ impl GdriveClient for HttpGdriveClient {
         ));
         let resp = self
             .authed(ureq::get(&format!(
-                "{DRIVE_API}/files?q={q}&pageSize=1000&fields=files(id,name)"
+                "{}/files?q={q}&pageSize=1000&fields=files(id,name)",
+                self.drive_api
             )))
             .call()?;
         let fl: FileList = resp.into_json().map_err(|e| Error::Gdrive(e.to_string()))?;
@@ -778,7 +796,8 @@ impl GdriveClient for HttpGdriveClient {
         ));
         let resp = self
             .authed(ureq::get(&format!(
-                "{DRIVE_API}/files?q={q}&fields=files(id,name)"
+                "{}/files?q={q}&fields=files(id,name)",
+                self.drive_api
             )))
             .call()?;
         let fl: FileList = resp.into_json().map_err(|e| Error::Gdrive(e.to_string()))?;
@@ -788,7 +807,7 @@ impl GdriveClient for HttpGdriveClient {
             Some(f) => f.id,
             None => {
                 let resp = self
-                    .authed(ureq::post(&format!("{DRIVE_API}/files")))
+                    .authed(ureq::post(&format!("{}/files", self.drive_api)))
                     .set("Content-Type", "application/json")
                     .send_json(serde_json::json!({
                         "name": folder_name,
@@ -800,7 +819,9 @@ impl GdriveClient for HttpGdriveClient {
             }
         };
 
-        // Ensure the marker file exists.
+        // Ensure the marker file exists. Multipart upload (name + parent in
+        // the metadata part) — a bare media upload would land in My Drive
+        // root as "Untitled" and list_vaults would not see it.
         let children = self.list_children(&folder_id)?;
         if !children.iter().any(|c| c.name == VAULT_TAG) {
             let marker = VaultMarker {
@@ -810,14 +831,7 @@ impl GdriveClient for HttpGdriveClient {
                 tool_version: env!("CARGO_PKG_VERSION").to_string(),
             };
             let bytes = serde_json::to_vec_pretty(&marker)?;
-            let resp = self
-                .authed(ureq::post(&format!(
-                    "{UPLOAD_API}?uploadType=media&fields=id"
-                )))
-                .set("Content-Type", "application/json")
-                .send_bytes(&bytes)?;
-            let _created: FileCreated =
-                resp.into_json().map_err(|e| Error::Gdrive(e.to_string()))?;
+            self.upload_file(&folder_id, VAULT_TAG, &bytes)?;
         }
         Ok(folder_id)
     }
@@ -844,7 +858,8 @@ impl GdriveClient for HttpGdriveClient {
 
         let resp = self
             .authed(ureq::post(&format!(
-                "{UPLOAD_API}?uploadType=multipart&fields=id"
+                "{}?uploadType=multipart&fields=id",
+                self.upload_api
             )))
             .set(
                 "Content-Type",
@@ -857,7 +872,10 @@ impl GdriveClient for HttpGdriveClient {
 
     fn download_file(&mut self, file_id: &str) -> Result<Vec<u8>> {
         let resp = self
-            .authed(ureq::get(&format!("{DRIVE_API}/files/{file_id}?alt=media")))
+            .authed(ureq::get(&format!(
+                "{}/files/{file_id}?alt=media",
+                self.drive_api
+            )))
             .call()?;
         let mut buf = Vec::new();
         resp.into_reader()
@@ -1630,5 +1648,143 @@ mod tests {
         let c2 = creds("a@b.c");
         save_creds_fast(&path, b"pw", &c2).unwrap();
         assert_eq!(load_creds_fast(&path, b"pw").unwrap().client_secret, None);
+    }
+
+    /// Recorded (request line, body) pairs from the fake Drive server.
+    type Recorded = std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>;
+
+    /// Minimal local fake of the Drive REST API: records every request
+    /// (line, body) and answers canned JSON keyed on the request line.
+    fn fake_drive() -> (std::net::SocketAddr, Recorded) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let requests: Recorded = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let reqs = std::sync::Arc::clone(&requests);
+        std::thread::spawn(move || {
+            let marker = serde_json::json!({
+                "kind": "tsbak-vault",
+                "version": 1,
+                "created_at": "t",
+                "tool_version": "t"
+            })
+            .to_string();
+            for stream in listener.incoming().take(16) {
+                let Ok(mut stream) = stream else { break };
+                let mut buf: Vec<u8> = Vec::new();
+                let mut chunk = [0u8; 4096];
+                let mut header_end = None;
+                while header_end.is_none() {
+                    let n = match stream.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => n,
+                    };
+                    buf.extend_from_slice(&chunk[..n]);
+                    if let Some(p) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                        header_end = Some(p + 4);
+                    }
+                }
+                let Some(header_end) = header_end else { break };
+                let head = String::from_utf8_lossy(&buf[..header_end]).to_string();
+                let content_length = head
+                    .lines()
+                    .find_map(|l| {
+                        let (k, v) = l.split_once(':')?;
+                        k.trim()
+                            .eq_ignore_ascii_case("content-length")
+                            .then(|| v.trim().parse::<usize>().ok())
+                            .flatten()
+                    })
+                    .unwrap_or(0);
+                let mut body = buf[header_end..].to_vec();
+                while body.len() < content_length {
+                    let n = stream.read(&mut chunk).unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    body.extend_from_slice(&chunk[..n]);
+                }
+                let line = head.lines().next().unwrap_or_default().to_string();
+                let n_before = {
+                    let mut r = reqs.lock().unwrap();
+                    r.push((line.clone(), String::from_utf8_lossy(&body).into_owned()));
+                    r.len()
+                };
+                // The first children listing (during ensure_vault) is empty;
+                // later ones (list_vaults) show the marker + one backup.
+                let children = if n_before <= 4 {
+                    r#"{"files":[]}"#.to_string()
+                } else {
+                    r#"{"files":[{"id":"marker-1","name":".tsbak-vault","mimeType":"application/json"},{"id":"tsb-1","name":"b.tsb","mimeType":"application/octet-stream","size":"10","createdTime":"2026-01-01T00:00:00Z"}]}"#
+                        .to_string()
+                };
+                let resp_body = if line.starts_with("GET") && line.contains("in%20parents") {
+                    children
+                } else if line.contains("alt=media") {
+                    marker.clone()
+                } else if line.starts_with("GET") {
+                    // "name contains …" (list_vaults) → the folder;
+                    // "name = …" (ensure_vault lookup) → nothing yet.
+                    if line.contains("contains") {
+                        r#"{"files":[{"id":"folder-1","name":"termius.tsbak-vault","mimeType":"application/vnd.google-apps.folder"}]}"#
+                            .to_string()
+                    } else {
+                        r#"{"files":[]}"#.to_string()
+                    }
+                } else if line.contains("uploadType=multipart") {
+                    r#"{"id":"marker-1"}"#.to_string()
+                } else {
+                    r#"{"id":"folder-1"}"#.to_string()
+                };
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    resp_body.len(),
+                    resp_body
+                );
+                if stream.write_all(resp.as_bytes()).is_err() {
+                    break;
+                }
+            }
+        });
+        (addr, requests)
+    }
+
+    #[test]
+    fn ensure_vault_marker_lands_inside_folder_and_vault_is_listable() {
+        // Regression: the marker was once uploaded with uploadType=media and
+        // no metadata, so Drive created "Untitled" in My Drive root and
+        // list_vaults could not see the vault at all.
+        let (addr, requests) = fake_drive();
+        let base = format!("http://{addr}/drive/v3");
+        let upload = format!("http://{addr}/upload/drive/v3/files");
+        let mut client = HttpGdriveClient::with_base("tok".into(), &base, &upload);
+
+        let folder_id = client.ensure_vault("termius").unwrap();
+        assert_eq!(folder_id, "folder-1");
+
+        // The marker must go up as multipart with name + parent metadata.
+        let reqs = requests.lock().unwrap();
+        let marker_upload = reqs
+            .iter()
+            .find(|(line, _)| line.contains("uploadType=multipart"))
+            .expect("marker uploaded via multipart");
+        assert!(
+            marker_upload.1.contains(r#""name":".tsbak-vault""#),
+            "marker metadata missing name: {}",
+            marker_upload.1
+        );
+        assert!(
+            marker_upload.1.contains(r#""parents":["folder-1"]"#),
+            "marker metadata missing parent: {}",
+            marker_upload.1
+        );
+        drop(reqs);
+
+        // …so a vault created this way is found by list_vaults.
+        let vaults = client.list_vaults().unwrap();
+        assert_eq!(vaults.len(), 1);
+        assert_eq!(vaults[0].name, "termius.tsbak-vault");
+        assert_eq!(vaults[0].backup_count, 1);
     }
 }
