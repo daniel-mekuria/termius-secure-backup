@@ -40,41 +40,54 @@ const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const DRIVE_API: &str = "https://www.googleapis.com/drive/v3";
 const UPLOAD_API: &str = "https://www.googleapis.com/upload/drive/v3/files";
 
-/// Build-time default OAuth client id (`GDRIVE_CLIENT_ID_DEFAULT` env at
-/// compile time). When unset, `TSBAK_GDRIVE_CLIENT_ID` is required at run
-/// time — registering a GCP OAuth (desktop) client is the only setup.
+/// OAuth client id baked into the binary (the maintainer's Google Cloud
+/// project). `gdrive login` works out of the box with it; override with
+/// `TSBAK_GDRIVE_CLIENT_ID` to use your own client.
+pub const DEFAULT_CLIENT_ID: &str =
+    "455697777200-n4f1hk4sje222v1a08t11kasaof3bu49.apps.googleusercontent.com";
+
+/// Client secret for [`DEFAULT_CLIENT_ID`]. That client is configured as
+/// *confidential*, so Google's token endpoint requires the secret. A
+/// desktop-client secret only identifies the *app* to Google — it does not
+/// authenticate or grant access to any user account.
+pub const DEFAULT_CLIENT_SECRET: &str = "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";
+
+/// Optional build-time client id override (`GDRIVE_CLIENT_ID_DEFAULT` env
+/// at compile time), for distros that want to bake in their own client.
 const BUILD_CLIENT_ID: Option<&'static str> = option_env!("GDRIVE_CLIENT_ID_DEFAULT");
 
 /// Resolve the OAuth2 client id: env `TSBAK_GDRIVE_CLIENT_ID`, else the
-/// build-time default, else a helpful error.
-pub fn client_id() -> Result<String> {
+/// build-time default, else the baked-in [`DEFAULT_CLIENT_ID`].
+pub fn client_id() -> String {
     if let Ok(v) = std::env::var("TSBAK_GDRIVE_CLIENT_ID") {
         let t = v.trim();
         if !t.is_empty() {
-            return Ok(t.to_string());
+            return t.to_string();
         }
     }
     if let Some(v) = BUILD_CLIENT_ID {
         let t = v.trim();
         if !t.is_empty() {
-            return Ok(t.to_string());
+            return t.to_string();
         }
     }
-    Err(Error::Gdrive(
-        "no Google OAuth client id configured. Register a GCP OAuth (desktop) \
-         client with the Drive API and set TSBAK_GDRIVE_CLIENT_ID."
-            .into(),
-    ))
+    DEFAULT_CLIENT_ID.to_string()
 }
 
-/// Optional OAuth client secret (env `TSBAK_GDRIVE_CLIENT_SECRET`). Public
-/// desktop clients don't need one (login flows use PKCE); confidential
-/// clients require it at Google's token endpoint.
+/// Resolve the OAuth client secret: env `TSBAK_GDRIVE_CLIENT_SECRET`, else
+/// the baked-in [`DEFAULT_CLIENT_SECRET`] **only when** the resolved client
+/// is the baked-in one (a custom client may be public and must not receive
+/// a foreign secret). Public desktop clients otherwise need no secret
+/// (login flows use PKCE); confidential clients require it at Google's
+/// token endpoint.
 pub fn client_secret() -> Option<String> {
-    std::env::var("TSBAK_GDRIVE_CLIENT_SECRET")
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
+    if let Ok(v) = std::env::var("TSBAK_GDRIVE_CLIENT_SECRET") {
+        let t = v.trim();
+        if !t.is_empty() {
+            return Some(t.to_string());
+        }
+    }
+    (client_id() == DEFAULT_CLIENT_ID).then(|| DEFAULT_CLIENT_SECRET.to_string())
 }
 
 /// Append `&client_secret=…` to a urlencoded body when a secret is set.
@@ -986,10 +999,12 @@ impl Session {
     pub fn open(creds_path: &Path, master_password: &[u8]) -> Result<Self> {
         let mut creds = load_creds(creds_path, master_password)?;
         if creds.token_expired() {
-            let client_id = client_id()?;
+            // Refresh with the client the login actually used (stored in
+            // the credential blob), not the currently resolved one — the
+            // two may differ if the user switched clients since login.
             eprintln!("Refreshing Google access token …");
             let (at, exp) = refresh_access_token(
-                &client_id,
+                &creds.client_id,
                 creds.client_secret.as_deref(),
                 &creds.refresh_token,
             )?;
@@ -1050,7 +1065,7 @@ pub fn run_login(creds_path: &Path) -> Result<()> {
     {
         return Err(Error::Canceled("login canceled".into()));
     }
-    let client_id = client_id()?;
+    let client_id = client_id();
     let client_secret = client_secret();
     let email = prompt::ask_string("Google Drive account email (labels this backup):", None)?;
     let tokens = match device_flow(&client_id, client_secret.as_deref()) {
@@ -1568,6 +1583,33 @@ mod tests {
         push_client_secret(&mut b, None);
         push_client_secret(&mut b, Some(""));
         assert_eq!(b, "x=1");
+    }
+
+    #[test]
+    fn client_resolution_baked_in_default_and_env_overrides() {
+        std::env::remove_var("TSBAK_GDRIVE_CLIENT_ID");
+        std::env::remove_var("TSBAK_GDRIVE_CLIENT_SECRET");
+
+        // No env: the baked-in default client is used, and its secret is
+        // supplied automatically (the client is confidential).
+        assert_eq!(client_id(), DEFAULT_CLIENT_ID);
+        assert_eq!(client_secret().as_deref(), Some(DEFAULT_CLIENT_SECRET));
+
+        // Env client id wins; the baked-in secret is NOT offered for a
+        // foreign client.
+        std::env::set_var("TSBAK_GDRIVE_CLIENT_ID", "custom-client-id");
+        assert_eq!(client_id(), "custom-client-id");
+        assert_eq!(client_secret(), None);
+
+        // An explicit env secret always wins.
+        std::env::set_var("TSBAK_GDRIVE_CLIENT_SECRET", "custom-secret");
+        assert_eq!(client_secret().as_deref(), Some("custom-secret"));
+
+        // Back to the default client: the baked-in secret returns.
+        std::env::remove_var("TSBAK_GDRIVE_CLIENT_ID");
+        std::env::remove_var("TSBAK_GDRIVE_CLIENT_SECRET");
+        assert_eq!(client_id(), DEFAULT_CLIENT_ID);
+        assert_eq!(client_secret().as_deref(), Some(DEFAULT_CLIENT_SECRET));
     }
 
     #[test]

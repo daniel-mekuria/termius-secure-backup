@@ -103,9 +103,11 @@ fn gdrive_restore_without_login_fails_with_login_hint() {
 }
 
 #[test]
-fn gdrive_login_without_client_id_fails() {
-    // No TSBAK_GDRIVE_CLIENT_ID in the CI environment -> the login flow
-    // reports the missing client id before doing any prompting.
+fn gdrive_login_without_env_uses_baked_in_client() {
+    // No TSBAK_GDRIVE_CLIENT_ID in the environment -> the baked-in
+    // default client id is used, so login gets past client resolution
+    // to the email prompt, which fails cleanly in a non-interactive
+    // session (no TTY). No network is touched before that point.
     let tmp = tempfile::tempdir().unwrap();
     bin()
         .args([
@@ -115,10 +117,11 @@ fn gdrive_login_without_client_id_fails() {
             &creds_in(&tmp).display().to_string(),
         ])
         .env_remove("TSBAK_GDRIVE_CLIENT_ID")
+        .env_remove("TSBAK_GDRIVE_CLIENT_SECRET")
         .assert()
         .failure()
-        .code(7) // ExitCode::Remote
-        .stderr(predicate::str::contains("client id"));
+        .code(5) // ExitCode::Canceled
+        .stderr(predicate::str::contains("non-interactive"));
 }
 
 #[test]

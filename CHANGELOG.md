@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- `gdrive` commands now work **out of the box**: the maintainer's Google
+  OAuth client id (and its secret — that client is *confidential*) is
+  baked into the binary, so `gdrive login` no longer needs
+  `TSBAK_GDRIVE_CLIENT_ID` / `TSBAK_GDRIVE_CLIENT_SECRET` exported. Both
+  env vars still override the baked-in default for users who register
+  their own client; the baked-in secret is only sent to Google when the
+  baked-in client is the one in use.
+- Google access-token refresh now uses the client id/secret stored in the
+  encrypted credential blob (the ones the login actually used) instead of
+  whatever is currently configured, so switching OAuth clients after
+  logging in no longer breaks token refresh.
+
+### Changed
+- `gdrive` works out of the box: a Google OAuth client (id **and** secret,
+  since it is a confidential desktop client) is now **baked into the
+  binary**, so `gdrive login` no longer requires
+  `TSBAK_GDRIVE_CLIENT_ID`. The env vars `TSBAK_GDRIVE_CLIENT_ID` /
+  `TSBAK_GDRIVE_CLIENT_SECRET` still override the baked-in defaults for
+  people who register their own client.
+- Token refresh now uses the client id/secret stored in the encrypted
+  credential blob (the ones the login actually used) instead of whatever
+  is configured at refresh time, so switching clients after login does
+  not break auto-refresh.
+
 ## [0.2.0] - 2026-08-31
 
 ### Added

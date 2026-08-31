@@ -188,13 +188,32 @@ Uploaded backups are identical `.tsb` files, so `info`, local `restore`, and
 `--password-file`, `--password-env`, `--yes`, and `--creds-file` apply to
 `gdrive backup` / `gdrive restore` as they do to the local commands.
 
-### One-time setup: using your own Google OAuth client
+### Google sign-in: nothing to set up
 
-Google requires every app that signs in to Drive to present its own
-**OAuth client id**, so there is none baked into this tool — you register
-one in your own (free) Google Cloud project, and all of the OAuth consent
-and account data stays under your own Google account. It takes a few
-minutes:
+Google only offers OAuth for Drive access (no email+password login), and
+requires every app to present an **OAuth client id**. This binary ships
+with one **baked in**, so `gdrive login` works out of the box — just sign
+in with your own Google account.
+
+What the baked-in client id means:
+
+- It is an **identifier, not a secret** (like a username) — it only tells
+  Google which app is asking to sign in.
+- The OAuth consent screen you approve is registered under the
+  maintainer's Google Cloud project. Your data still flows only through
+  **your** Google account, under the least-privilege `drive.file` scope
+  (files this tool creates).
+- The baked-in client is configured as *confidential*, so its client
+  secret ships with the binary as well. A desktop-client secret only lets
+  someone present *the app* to Google's token endpoint — it does not
+  grant access to any user's account. After `gdrive login` it lives in
+  the encrypted credential blob, not in a shell variable.
+
+### Using your own Google OAuth client (optional)
+
+If you'd rather the sign-in screen be registered under **your** Google
+Cloud project (e.g. for a team), register a client there and override the
+baked-in default with `TSBAK_GDRIVE_CLIENT_ID`. It takes a few minutes:
 
 1. **Create a project.** Open the
    [Google Cloud Console](https://console.cloud.google.com) and create a
@@ -240,7 +259,8 @@ shell variable after `gdrive login`.
 > take effect". Until your client is live, `gdrive login` reports
 > `The OAuth client was not found` — just wait and re-run it.
 
-**How `gdrive login` uses your client id.** It first tries the OAuth
+**How `gdrive login` uses the configured client id** (the baked-in
+default, or your override). It first tries the OAuth
 **device flow** — a short code you approve at `google.com/device`, which
 works well over SSH. Some Google clients are not eligible for the device
 flow; when Google rejects it with `invalid_client`, the tool
