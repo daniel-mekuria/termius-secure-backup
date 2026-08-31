@@ -153,6 +153,9 @@ pub enum GdriveAction {
     Backup(GdriveBackupArgs),
     /// Restore the Termius data directory from a backup on Google Drive.
     Restore,
+    /// Continuously re-back up to Google Drive while the Termius directory
+    /// changes (Ctrl-C to stop).
+    Sync(GdriveSyncArgs),
 }
 
 #[derive(Args, Debug, Default)]
@@ -160,4 +163,24 @@ pub struct GdriveBackupArgs {
     /// Name for the backup (a `<name>.tsbak-vault` folder is created on Drive).
     #[arg(long)]
     pub name: Option<String>,
+    /// Keep only the newest N backups in the vault (0 = keep all, the
+    /// default).
+    #[arg(long, default_value_t = 0)]
+    pub keep: u32,
+}
+
+#[derive(Args, Debug)]
+pub struct GdriveSyncArgs {
+    /// Vault name (prompts if absent; a `<name>.tsbak-vault` folder on Drive).
+    #[arg(long)]
+    pub name: Option<String>,
+    /// How often (seconds) to check for changes; minimum 5.
+    #[arg(long, default_value_t = 60)]
+    pub interval: u64,
+    /// Keep only the newest N backups in the vault (0 = keep all).
+    #[arg(long, default_value_t = 10)]
+    pub keep: u32,
+    /// Check once, upload if changed, then exit (for cron / systemd timers).
+    #[arg(long)]
+    pub once: bool,
 }

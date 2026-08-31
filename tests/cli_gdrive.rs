@@ -27,7 +27,53 @@ fn gdrive_help_lists_subcommands() {
         .stdout(predicate::str::contains("logout"))
         .stdout(predicate::str::contains("status"))
         .stdout(predicate::str::contains("backup"))
-        .stdout(predicate::str::contains("restore"));
+        .stdout(predicate::str::contains("restore"))
+        .stdout(predicate::str::contains("sync"));
+}
+
+#[test]
+fn gdrive_sync_help_lists_flags() {
+    bin()
+        .args(["gdrive", "sync", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--name"))
+        .stdout(predicate::str::contains("--interval"))
+        .stdout(predicate::str::contains("--keep"))
+        .stdout(predicate::str::contains("--once"));
+}
+
+#[test]
+fn gdrive_backup_help_lists_keep_flag() {
+    bin()
+        .args(["gdrive", "backup", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--keep"));
+}
+
+#[test]
+fn gdrive_sync_without_login_fails_with_login_hint() {
+    let tmp = tempfile::tempdir().unwrap();
+    let termius = tmp.path().join("termius");
+    fs::create_dir_all(&termius).unwrap();
+    fs::write(termius.join("f.txt"), b"data").unwrap();
+    bin()
+        .args([
+            "gdrive",
+            "sync",
+            "--name",
+            "test",
+            "--termius-dir",
+            &termius.display().to_string(),
+            "--creds-file",
+            &creds_in(&tmp).display().to_string(),
+            "--yes",
+        ])
+        .assert()
+        .failure()
+        .code(3) // ExitCode::Auth
+        .stderr(predicate::str::contains("not logged in"));
 }
 
 #[test]

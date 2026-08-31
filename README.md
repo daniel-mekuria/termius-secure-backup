@@ -188,6 +188,63 @@ Uploaded backups are identical `.tsb` files, so `info`, local `restore`, and
 `--password-file`, `--password-env`, `--yes`, and `--creds-file` apply to
 `gdrive backup` / `gdrive restore` as they do to the local commands.
 
+### Continuous sync with Google Drive
+
+`gdrive sync` keeps a vault up to date automatically: it watches the Termius
+data directory and uploads a fresh encrypted `.tsb` whenever it changes.
+
+After a successful `gdrive backup` the tool also asks *"Back up to Google
+Drive continuously while Termius changes?"* — answering yes starts the same
+watcher (the backup you just made becomes the baseline, so nothing is
+re-uploaded a moment later).
+
+```sh
+# Watch the directory and re-backup as Termius changes (Ctrl-C to stop):
+termius-backup gdrive sync --name laptop
+
+# Cron / systemd timer friendly: check once, upload if changed, exit:
+termius-backup gdrive sync --name laptop --once
+```
+
+- **How change detection works**: every `--interval` seconds (default 60,
+  minimum 5) the tool fingerprints the tree (file count + total size + newest
+  mtime). An upload happens only once the tree has been *unchanged* for a few
+  seconds (the debounce, ≤ 10 s), so a half-written file is never captured;
+  if the fingerprint still moves during packing, that window is skipped and
+  re-checked on the next tick. A tree that never settles (Termius is always
+  writing something) is force-uploaded every 15 minutes anyway.
+- **Retention**: `--keep N` (default 10) trims the vault to the newest N
+  backups after each upload; `--keep 0` keeps everything. `gdrive backup
+  --keep N` applies the same retention once per run.
+- **Passwords**: the master password unlocks the stored Google credentials
+  up front (a wrong one fails fast), and the backup password is asked once
+  and cached in memory for the whole session — you are not re-prompted on
+  every upload. In `--once` mode set `TSBAK_GDRIVE_MASTER_PASSWORD` and
+  `--password-file`/`--password-env` for a fully unattended run.
+- **Network hiccups** (and a Google token that expires mid-run) are retried
+  on the next tick — the watcher keeps running; Ctrl-C is the only stop.
+
+Example systemd timer (daily unattended sync at ~03:07):
+
+```ini
+# /etc/systemd/system/tsbak-sync.service
+[Unit]
+Description=Termius → Google Drive sync (once)
+
+[Service]
+Type=oneshot
+Environment=TSBAK_GDRIVE_MASTER_PASSWORD=change-me
+ExecStart=/usr/local/bin/termius-backup gdrive sync --name laptop --once --password-file /var/lib/tsbak/pw
+
+# /etc/systemd/system/tsbak-sync.timer
+[Unit]
+Description=Daily Termius sync
+
+[Timer]
+OnCalendar=*-*-* 03:07:00
+Persistent=true
+```
+
 ### Google sign-in: nothing to set up
 
 Google only offers OAuth for Drive access (no email+password login), and

@@ -10,7 +10,7 @@ use termius_secure_backup::cli::{Cli, Command, GdriveAction, Globals, SnapshotsA
 use termius_secure_backup::error::ExitCode as AppExitCode;
 use termius_secure_backup::util;
 use termius_secure_backup::{
-    backup, container, crypto, gdrive, paths, restore, rollback, snapshot, wizard,
+    backup, container, crypto, gdrive, paths, restore, rollback, snapshot, sync, wizard,
 };
 
 fn main() -> ExitCode {
@@ -195,8 +195,17 @@ fn run_gdrive(g: &Refs, action: GdriveAction) -> termius_secure_backup::error::R
                 password_env: g.password_env(),
                 creds_path: &creds,
                 yes: g.yes,
+                keep: a.keep,
             })?;
             eprintln!("Done: backup in vault '{vault}' (Drive file {file_id})");
+            sync::offer_after_backup(
+                g.termius_dir(),
+                g.password_file(),
+                g.password_env(),
+                &creds,
+                g.yes,
+                &vault,
+            );
         }
         GdriveAction::Restore => {
             let p = gdrive::run_restore(gdrive::RestoreOptions {
@@ -208,6 +217,21 @@ fn run_gdrive(g: &Refs, action: GdriveAction) -> termius_secure_backup::error::R
                 yes: g.yes,
             })?;
             eprintln!("Done: restored into {}", p.display());
+        }
+        GdriveAction::Sync(a) => {
+            sync::run_sync(sync::SyncOptions {
+                termius_dir: g.termius_dir(),
+                name: a.name.as_deref(),
+                password_file: g.password_file(),
+                password_env: g.password_env(),
+                creds_path: &creds,
+                yes: g.yes,
+                interval: a.interval,
+                keep: a.keep,
+                once: a.once,
+                last_sig: None,
+                kdf: crypto::KdfParams::default(),
+            })?;
         }
     }
     Ok(())

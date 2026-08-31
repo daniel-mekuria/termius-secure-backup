@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `gdrive sync` — continuously re-backs up to a Google Drive vault while
+  the Termius directory changes. An in-process watcher polls a cheap tree
+  fingerprint (file count + total size + newest mtime) every
+  `--interval` seconds (default 60, minimum 5) and uploads a fresh
+  encrypted `.tsb` once the tree has settled (≤ 10 s debounce); a
+  tree that never settles is force-uploaded every 15 minutes. A
+  torn-write guard re-checks the fingerprint after packing and skips the
+  window if the tree moved mid-pack. `--once` checks once, uploads if
+  changed, and exits — cron / systemd-timer friendly (README has a full
+  timer example). Transient network failures (and a Google token that
+  expires mid-run) are retried on the next tick; Ctrl-C stops the watcher.
+- Post-backup sync offer: after a successful `gdrive backup` (wizard or
+  direct), the tool asks whether to start the continuous sync; the
+  backup just made becomes the baseline so it is not re-uploaded.
+- `--keep N` retention flag: `gdrive backup --keep N` trims the vault to
+  the newest N backups once per run; `gdrive sync --keep N` (default 10)
+  applies it after every upload. `0` keeps everything (the old default
+  for `gdrive backup`, unchanged).
+- `TSBAK_GDRIVE_MASTER_PASSWORD` environment variable: when set, the
+  Google Drive master password is read from it (one attempt, no prompt)
+  so long syncs and `--once` runs can be fully unattended.
+
+### Changed
+- Wrong passwords no longer end the run: at every password prompt
+  (backup, restore, and the Google Drive master password) a wrong entry
+  re-prompts up to 3 times before failing, and the "previous data was
+  preserved in snapshot …" hint is printed once after the final failure
+  instead of per attempt. Piped / file / env-var passwords still fail
+  fast (one attempt), so scripts keep deterministic behavior.
+- Empty input at a required prompt (password, free-text value) now
+  re-prompts on a TTY instead of failing; EOF ends the prompt.
+
+### Fixed
+- `gdrive restore` reported "no backup vaults found" right after a
+  successful `gdrive backup`: the vault's marker file was uploaded with
+  no name and no parent, so Drive created it as an "Untitled" file in
+  the My Drive root and the vault folder was filtered out of the list.
+  The marker is now uploaded with proper metadata (name + parent folder).
+  Re-running `gdrive backup` with the same name heals an existing
+  vault; the stray "Untitled" file in the Drive root is safe to delete.
+
 ## [0.2.1] - 2026-08-31
 
 ### Changed

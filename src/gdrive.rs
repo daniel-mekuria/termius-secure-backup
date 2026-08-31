@@ -102,6 +102,18 @@ pub fn vault_folder_name(name: &str) -> String {
     format!("{name}{VAULT_TAG}")
 }
 
+/// The user-facing name of a vault folder: the `.tsbak-vault` suffix
+/// stripped (folders without the suffix are returned unchanged).
+pub fn vault_base_name(folder_name: &str) -> &str {
+    folder_name.strip_suffix(VAULT_TAG).unwrap_or(folder_name)
+}
+
+/// Timestamped file name for a `.tsb` upload, e.g.
+/// `2026-08-31T08-13-46.000000000Z-termius.tsb`.
+pub fn tsb_file_name(now: &time::OffsetDateTime) -> String {
+    format!("{}-termius.tsb", util::local_timestamp_string(now))
+}
+
 // ---------------------------------------------------------------------------
 // Credential store
 // ---------------------------------------------------------------------------
@@ -149,6 +161,28 @@ pub fn load_creds(path: &Path, master_password: &[u8]) -> Result<Creds> {
         detail: format!("credential blob: {e}"),
         offset: 0,
     })
+}
+
+/// Refresh `creds`' access token if it is expired (or expiring within a
+/// minute), using the client id/secret the login actually used (stored in
+/// the credential blob — the currently configured client may differ), and
+/// persist the result. Returns true if a refresh happened. Used by
+/// [`Session::open`] and by long-running sync loops that must renew
+/// mid-run.
+pub fn refresh_if_expired(creds: &mut Creds, path: &Path, master_password: &[u8]) -> Result<bool> {
+    if !creds.token_expired() {
+        return Ok(false);
+    }
+    eprintln!("Refreshing Google access token …");
+    let (at, exp) = refresh_access_token(
+        &creds.client_id,
+        creds.client_secret.as_deref(),
+        &creds.refresh_token,
+    )?;
+    creds.access_token = at;
+    creds.expires_at = exp;
+    save_creds(path, master_password, creds)?;
+    Ok(true)
 }
 
 // ---------------------------------------------------------------------------
@@ -631,6 +665,8 @@ pub trait GdriveClient {
     fn upload_file(&mut self, folder_id: &str, name: &str, data: &[u8]) -> Result<String>;
     /// Download a file's bytes; returns the content.
     fn download_file(&mut self, file_id: &str) -> Result<Vec<u8>>;
+    /// Move a file to the Drive trash.
+    fn delete_file(&mut self, file_id: &str) -> Result<()>;
 }
 
 #[derive(Deserialize)]
@@ -883,6 +919,12 @@ impl GdriveClient for HttpGdriveClient {
             .map_err(|e| Error::Gdrive(e.to_string()))?;
         Ok(buf)
     }
+
+    fn delete_file(&mut self, file_id: &str) -> Result<()> {
+        self.authed(ureq::delete(&format!("{}/files/{file_id}", self.drive_api)))
+            .call()?;
+        Ok(())
+    }
 }
 
 /// In-memory mock of [`GdriveClient`] for offline unit tests.
@@ -994,6 +1036,15 @@ impl GdriveClient for MockGdriveClient {
             .map(|f| f.3.clone())
             .ok_or_else(|| Error::Gdrive(format!("mock: no file {file_id}")))
     }
+
+    fn delete_file(&mut self, file_id: &str) -> Result<()> {
+        let before = self.files.len();
+        self.files.retain(|f| f.0 != file_id);
+        if self.files.len() == before {
+            return Err(Error::Gdrive(format!("mock: no file {file_id}")));
+        }
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1012,29 +1063,38 @@ impl Session {
         &self.creds.email
     }
 
+    /// True when the current access token has expired (or will within a
+    /// minute) — long-running loops should [`refresh_if_expired`](Self::refresh_if_expired).
+    pub fn token_expired(&self) -> bool {
+        self.creds.token_expired()
+    }
+
     /// Production constructor: load + decrypt the credential store, refresh
     /// the access token if expired (persisting it), and open a real client.
     pub fn open(creds_path: &Path, master_password: &[u8]) -> Result<Self> {
         let mut creds = load_creds(creds_path, master_password)?;
-        if creds.token_expired() {
-            // Refresh with the client the login actually used (stored in
-            // the credential blob), not the currently resolved one — the
-            // two may differ if the user switched clients since login.
-            eprintln!("Refreshing Google access token …");
-            let (at, exp) = refresh_access_token(
-                &creds.client_id,
-                creds.client_secret.as_deref(),
-                &creds.refresh_token,
-            )?;
-            creds.access_token = at;
-            creds.expires_at = exp;
-            save_creds(creds_path, master_password, &creds)?;
-        }
+        let _ = refresh_if_expired(&mut creds, creds_path, master_password)?;
         let access_token = creds.access_token.clone();
         Ok(Session {
             creds,
             client: Box::new(HttpGdriveClient::new(access_token)),
         })
+    }
+
+    /// Renew the access token if it has expired (long-running syncs), and
+    /// re-point the live client at it. The caller must hold the master
+    /// password. Returns true if a refresh happened.
+    pub fn refresh_if_expired(
+        &mut self,
+        creds_path: &Path,
+        master_password: &[u8],
+    ) -> Result<bool> {
+        let changed = refresh_if_expired(&mut self.creds, creds_path, master_password)?;
+        if changed {
+            let at = self.creds.access_token.clone();
+            self.client = Box::new(HttpGdriveClient::new(at));
+        }
+        Ok(changed)
     }
 
     /// Constructor for tests / custom clients.
@@ -1058,6 +1118,63 @@ impl Session {
     pub fn download_file(&mut self, file_id: &str) -> Result<Vec<u8>> {
         self.client.download_file(file_id)
     }
+    pub fn delete_file(&mut self, file_id: &str) -> Result<()> {
+        self.client.delete_file(file_id)
+    }
+}
+
+/// Delete all but the newest `keep` backups in a vault folder
+/// (`keep == 0` = no pruning). Returns the number of files deleted.
+/// `list_backups` yields newest-first, so anything past index `keep` is
+/// older than the retained set.
+pub fn prune_vault(session: &mut Session, folder_id: &str, keep: u32) -> Result<usize> {
+    if keep == 0 {
+        return Ok(0);
+    }
+    let backups = session.list_backups(folder_id)?;
+    let to_delete: Vec<String> = backups
+        .iter()
+        .skip(keep as usize)
+        .map(|b| b.id.clone())
+        .collect();
+    let mut deleted = 0;
+    for id in &to_delete {
+        session.delete_file(id)?;
+        deleted += 1;
+    }
+    Ok(deleted)
+}
+
+/// Read the Google Drive master password, verifying it against the stored
+/// credentials. `TSBAK_GDRIVE_MASTER_PASSWORD`, when set, is used directly
+/// (one attempt, no prompt); otherwise the user is prompted, and a wrong
+/// password re-prompts up to [`prompt::MAX_PASSWORD_ATTEMPTS`] times on a
+/// TTY.
+pub fn master_password(creds_path: &Path) -> Result<String> {
+    if !creds_path.exists() {
+        return Err(Error::NotLoggedIn);
+    }
+    if let Ok(m) = std::env::var("TSBAK_GDRIVE_MASTER_PASSWORD") {
+        if !m.is_empty() {
+            load_creds(creds_path, m.as_bytes())?;
+            return Ok(m);
+        }
+    }
+    let max_attempts = if std::io::stdin().is_terminal() {
+        prompt::MAX_PASSWORD_ATTEMPTS
+    } else {
+        1
+    };
+    let mut last: Option<String> = None;
+    prompt::with_password_retry(
+        || prompt::read_password("Google Drive master password: "),
+        |m| {
+            last = Some(m.to_string());
+            load_creds(creds_path, m.as_bytes()).map(|_| ())
+        },
+        max_attempts,
+    )?;
+    Ok(last.expect("with_password_retry runs the attempt at least once"))
 }
 
 /// Load credentials (prompting for the master password) and open a session.
@@ -1066,24 +1183,8 @@ impl Session {
 /// supplied via the `TSBAK_GDRIVE_MASTER_PASSWORD` environment variable for
 /// scripted use — one attempt, no prompt.
 pub fn open_session(creds_path: &Path) -> Result<Session> {
-    if !creds_path.exists() {
-        return Err(Error::NotLoggedIn);
-    }
-    if let Ok(m) = std::env::var("TSBAK_GDRIVE_MASTER_PASSWORD") {
-        if !m.is_empty() {
-            return Session::open(creds_path, m.as_bytes());
-        }
-    }
-    let max_attempts = if std::io::stdin().is_terminal() {
-        prompt::MAX_PASSWORD_ATTEMPTS
-    } else {
-        1
-    };
-    prompt::with_password_retry(
-        || prompt::read_password("Google Drive master password: "),
-        |m| Session::open(creds_path, m.as_bytes()),
-        max_attempts,
-    )
+    let master = master_password(creds_path)?;
+    Session::open(creds_path, master.as_bytes())
 }
 
 /// Prompt for the master password (with re-entry + weak gate), then load
@@ -1167,7 +1268,13 @@ pub fn run_status(creds_path: &Path) -> Result<()> {
 }
 
 /// Encrypt `plaintext` into a `.tsb` container using explicit KDF params.
-fn encrypt_with(params: &KdfParams, password: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
+/// `pub(crate)` so the sync loop can produce uploads without a temp file per
+/// call.
+pub(crate) fn encrypt_with(
+    params: &KdfParams,
+    password: &[u8],
+    plaintext: &[u8],
+) -> Result<Vec<u8>> {
     let tmp = tempfile::NamedTempFile::new()?;
     container::write(tmp.path(), password, params, plaintext)?;
     Ok(std::fs::read(tmp.path())?)
@@ -1187,6 +1294,8 @@ pub struct BackupOptions<'a> {
     pub password_env: Option<&'a str>,
     pub creds_path: &'a Path,
     pub yes: bool,
+    /// Keep only the newest N backups in the vault (0 = keep all).
+    pub keep: u32,
 }
 
 /// Run a Google Drive backup. Returns `(vault_name, drive_file_id)`.
@@ -1208,7 +1317,7 @@ pub fn run_backup(opts: BackupOptions<'_>) -> Result<(String, String)> {
     let vault_name = vault_folder_name(&name);
 
     let now = util::current_time();
-    let file_name = format!("{}-termius.tsb", util::local_timestamp_string(&now));
+    let file_name = tsb_file_name(&now);
 
     // Backup password (re-entry + weak gate) — encrypts the payload.
     let password = backup::acquire_password(opts.password_file, opts.password_env, true, opts.yes)?;
@@ -1227,6 +1336,15 @@ pub fn run_backup(opts: BackupOptions<'_>) -> Result<(String, String)> {
 
     let folder_id = session.ensure_vault(&name)?;
     let file_id = session.upload_file(&folder_id, &file_name, &tsb)?;
+
+    // Optional retention: trim older backups down to the newest `keep`.
+    if opts.keep > 0 {
+        let n = prune_vault(&mut session, &folder_id, opts.keep)?;
+        if n > 0 {
+            eprintln!("Pruned {n} older backup(s); kept the newest {}.", opts.keep);
+        }
+    }
+
     eprintln!("Uploaded {file_name} to vault '{vault_name}' (Drive file id {file_id}).");
     Ok((vault_name, file_id))
 }

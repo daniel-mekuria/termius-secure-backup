@@ -11,7 +11,7 @@ use std::io::IsTerminal;
 use std::path::Path;
 
 use crate::error::{Error, Result};
-use crate::{backup, crypto, gdrive, paths, prompt, restore};
+use crate::{backup, crypto, gdrive, paths, prompt, restore, sync};
 
 /// Shared global flags the wizard needs. Mirrors the per-command globals so
 /// the wizard honors `--termius-dir`, `--snapshots-dir`, `--password-file`,
@@ -84,8 +84,17 @@ fn backup_gdrive(g: &Flags) -> Result<()> {
         password_env: g.password_env,
         creds_path: &creds,
         yes: g.yes,
+        keep: 0, // one-shot backup keeps everything by default
     })?;
     eprintln!("Done: backup in vault '{vault}' (Drive file {file_id})");
+    sync::offer_after_backup(
+        g.termius_dir,
+        g.password_file,
+        g.password_env,
+        &creds,
+        g.yes,
+        &vault,
+    );
     Ok(())
 }
 

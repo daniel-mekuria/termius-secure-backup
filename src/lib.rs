@@ -18,6 +18,7 @@ pub mod prompt;
 pub mod restore;
 pub mod rollback;
 pub mod snapshot;
+pub mod sync;
 pub mod util;
 pub mod weakpass;
 pub mod wizard;
