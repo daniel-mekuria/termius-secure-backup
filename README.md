@@ -258,6 +258,22 @@ OnCalendar=*-*-* 03:07:00
 Persistent=true
 ```
 
+**Turning sync off.** The watcher stops with Ctrl-C, and a scheduled run
+stops when its timer stops — but the tool also remembers whether it should
+*offer* continuous sync after a backup. If you'd rather it stop asking,
+turn it off:
+
+```sh
+termius-backup gdrive sync off                 # all vaults
+termius-backup gdrive sync off --name laptop   # just one vault
+termius-backup gdrive sync on                  # turn it back on
+```
+
+Turning a vault off also forgets its recorded baseline, so the next
+explicit `gdrive sync` for it starts from the current tree. The switch
+only affects the post-backup offer — explicit `gdrive sync` runs (and a
+systemd timer) work regardless.
+
 ### Google sign-in: nothing to set up
 
 Google only offers OAuth for Drive access (no email+password login), and

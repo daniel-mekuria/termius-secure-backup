@@ -17,6 +17,20 @@ fn creds_in(tmp: &tempfile::TempDir) -> std::path::PathBuf {
     tmp.path().join("gdrive-creds.tsb")
 }
 
+/// Run the binary with the user config directory redirected into `tmp`,
+/// so the on/off state file never touches a developer's real one.
+/// (HOME + XDG_CONFIG_HOME cover Linux/macOS; USERPROFILE + APPDATA
+/// cover Windows.)
+fn isolated(tmp: &tempfile::TempDir) -> Command {
+    let base = tmp.path();
+    let mut cmd = Command::cargo_bin("termius-backup").expect("binary present");
+    cmd.env("HOME", base);
+    cmd.env("XDG_CONFIG_HOME", base.join("config"));
+    cmd.env("USERPROFILE", base);
+    cmd.env("APPDATA", base.join("appdata"));
+    cmd
+}
+
 #[test]
 fn gdrive_help_lists_subcommands() {
     bin()
@@ -50,6 +64,39 @@ fn gdrive_backup_help_lists_keep_flag() {
         .assert()
         .success()
         .stdout(predicate::str::contains("--keep"));
+}
+
+/// The `gdrive sync on` / `off` subcommands exist and take `--name`.
+#[test]
+fn gdrive_sync_help_lists_on_off_subcommands() {
+    for sub in ["off", "on"] {
+        bin()
+            .args(["gdrive", "sync", sub, "--help"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("--name"));
+    }
+}
+
+/// `gdrive sync off` / `on` are pure local state operations: no login, no
+/// Termius directory, no credentials file required.
+#[test]
+fn gdrive_sync_off_on_round_trip_is_local_only() {
+    let tmp = tempfile::tempdir().unwrap();
+    isolated(&tmp)
+        .args(["gdrive", "sync", "off", "--name", "laptop"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Continuous sync turned off for vault 'laptop'",
+        ));
+    isolated(&tmp)
+        .args(["gdrive", "sync", "on", "--name", "laptop"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Continuous sync turned back on for vault 'laptop'",
+        ));
 }
 
 #[test]

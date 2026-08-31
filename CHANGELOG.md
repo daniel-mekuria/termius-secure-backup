@@ -27,6 +27,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Post-backup sync offer: after a successful `gdrive backup` (wizard or
   direct), the tool asks whether to start the continuous sync; the
   backup just made becomes the baseline so it is not re-uploaded.
+- `gdrive sync on` / `gdrive sync off [--name N]`: persistently
+  (re)enable the post-backup continuous-sync offer, per vault or for all
+  vaults. Turning a vault off also forgets its recorded baseline, so the
+  next explicit sync of it starts from a fresh tree; explicit
+  `gdrive sync` runs are unaffected by the switch.
 - `--keep N` retention flag: `gdrive backup --keep N` trims the vault to
   the newest N backups once per run; `gdrive sync --keep N` (default 10)
   applies it after every upload. `0` keeps everything (the old default

@@ -171,6 +171,9 @@ pub struct GdriveBackupArgs {
 
 #[derive(Args, Debug)]
 pub struct GdriveSyncArgs {
+    /// Manage the continuous-sync offer: `gdrive sync off` / `gdrive sync on`.
+    #[command(subcommand)]
+    pub command: Option<SyncCommand>,
     /// Vault name (prompts if absent; a `<name>.tsbak-vault` folder on Drive).
     #[arg(long)]
     pub name: Option<String>,
@@ -183,4 +186,21 @@ pub struct GdriveSyncArgs {
     /// Check once, upload if changed, then exit (for cron / systemd timers).
     #[arg(long)]
     pub once: bool,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum SyncCommand {
+    /// Turn the continuous sync off: stop suggesting it after backups and
+    /// forget the recorded baseline for the vault (or for all vaults
+    /// without `--name`). Explicit `gdrive sync` runs are not affected.
+    Off(SyncToggleArgs),
+    /// Turn the continuous sync back on (re-enable the post-backup offer).
+    On(SyncToggleArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct SyncToggleArgs {
+    /// Vault to turn off (all vaults when absent).
+    #[arg(long)]
+    pub name: Option<String>,
 }

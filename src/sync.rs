@@ -86,7 +86,14 @@ fn walk_signature(current: &Path, sig: &mut DirSignature) -> Result<()> {
 struct SyncStateFile {
     #[serde(default)]
     vaults: HashMap<String, DirSignature>,
+    /// Vault names whose continuous-sync offer has been turned off with
+    /// `gdrive sync off`; [`SYNC_OFF_ALL`] means "all vaults".
+    #[serde(default)]
+    sync_off: Vec<String>,
 }
+
+/// Sentinel stored in `sync_off` for a global (all-vaults) off.
+const SYNC_OFF_ALL: &str = "*";
 
 fn load_state_file(path: &Path) -> SyncStateFile {
     match std::fs::read_to_string(path) {
@@ -102,17 +109,52 @@ fn load_state_file(path: &Path) -> SyncStateFile {
     }
 }
 
+/// Persist the whole state file (atomic write).
+fn save_state_file(path: &Path, file: &SyncStateFile) -> Result<()> {
+    let json = serde_json::to_vec_pretty(file).expect("SyncStateFile serializes by construction");
+    util::atomic_write(path, &json)
+}
+
 fn record_state_file(path: &Path, vault: &str, sig: DirSignature) {
     let mut file = load_state_file(path);
     file.vaults.insert(vault.to_string(), sig);
-    let json =
-        serde_json::to_vec_pretty(&file).expect("SyncStateFile is serializable by construction");
-    if let Err(e) = util::atomic_write(path, &json) {
+    if let Err(e) = save_state_file(path, &file) {
         eprintln!(
             "warning: could not write sync state {}: {e}",
             path.display()
         );
     }
+}
+
+/// Turn the continuous-sync offer off (or back on) for `vault` — or for
+/// every vault when `vault` is `None` — in the state file at `path`.
+/// Turning a vault off also forgets its recorded baseline, so a later
+/// explicit sync of it starts from a fresh tree. Returns the updated list
+/// of off markers.
+fn toggle_sync_off(path: &Path, vault: Option<&str>, off: bool) -> Result<Vec<String>> {
+    let mut file = load_state_file(path);
+    if off {
+        match vault {
+            Some(v) => {
+                if !file.sync_off.iter().any(|x| x == v) {
+                    file.sync_off.push(v.to_string());
+                }
+                file.vaults.remove(v);
+            }
+            None => {
+                if !file.sync_off.iter().any(|x| x == SYNC_OFF_ALL) {
+                    file.sync_off.push(SYNC_OFF_ALL.to_string());
+                }
+            }
+        }
+    } else {
+        match vault {
+            Some(v) => file.sync_off.retain(|x| x != v),
+            None => file.sync_off.clear(),
+        }
+    }
+    save_state_file(path, &file)?;
+    Ok(file.sync_off)
 }
 
 /// The per-vault uploaded-fingerprint record from the default state file.
@@ -130,6 +172,30 @@ pub fn record_sync_state(vault: &str, sig: DirSignature) {
     if let Ok(p) = paths::sync_state_path() {
         record_state_file(&p, vault, sig);
     }
+}
+
+/// Whether the continuous-sync offer is turned off for `vault` (either
+/// globally, or for that vault specifically).
+pub fn sync_is_off(vault: &str) -> bool {
+    match paths::sync_state_path() {
+        Ok(p) => load_state_file(&p)
+            .sync_off
+            .iter()
+            .any(|x| x == SYNC_OFF_ALL || x == vault),
+        Err(_) => false,
+    }
+}
+
+/// Turn the continuous-sync offer off for `vault` (or every vault when
+/// `None`). Returns the list of off markers now in effect ("*" = all).
+pub fn sync_off(vault: Option<&str>) -> Result<Vec<String>> {
+    toggle_sync_off(&paths::sync_state_path()?, vault, true)
+}
+
+/// Turn the continuous-sync offer back on for `vault` (or every vault).
+/// Returns the list of off markers still in effect.
+pub fn sync_on(vault: Option<&str>) -> Result<Vec<String>> {
+    toggle_sync_off(&paths::sync_state_path()?, vault, false)
 }
 
 /// Scheduling parameters for the sync loop.
@@ -499,10 +565,10 @@ fn zeroize(buf: &mut [u8]) {
 }
 
 /// After a successful `gdrive backup`, offer to keep the vault up to date
-/// automatically. No-ops when `--yes` was passed or stdin is not a TTY
-/// (CI / pipes), and swallows sync errors with a message — the backup
-/// itself already succeeded, and a declined or failed sync should not fail
-/// the run.
+/// automatically. No-ops when `--yes` was passed, stdin is not a TTY
+/// (CI / pipes), or the offer was turned off with `gdrive sync off`; and
+/// it swallows sync errors with a message — the backup itself already
+/// succeeded, and a declined or failed sync should not fail the run.
 pub fn offer_after_backup(
     termius_dir: Option<&Path>,
     password_file: Option<&Path>,
@@ -515,6 +581,10 @@ pub fn offer_after_backup(
         return;
     }
     let base = gdrive::vault_base_name(vault_name);
+    // The user turned the offer off with `gdrive sync off` — honor it.
+    if sync_is_off(base) {
+        return;
+    }
     let accepted = match prompt::confirm(&format!(
         "Back up to Google Drive continuously while Termius changes? (vault '{base}')"
     )) {
@@ -784,6 +854,51 @@ mod tests {
         std::fs::write(&path, b"not json").unwrap();
         let file = load_state_file(&path);
         assert!(file.vaults.is_empty());
+    }
+
+    #[test]
+    fn sync_off_on_toggle_round_trip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("sync-state.json");
+        let a = sig(1, 10, 100);
+        let b = sig(2, 20, 200);
+        record_state_file(&path, "laptop", a);
+        record_state_file(&path, "server", b);
+
+        // Off for one vault: marker added, its baseline forgotten, the
+        // other vault's baseline untouched.
+        let off = toggle_sync_off(&path, Some("laptop"), true).unwrap();
+        assert_eq!(off, vec!["laptop".to_string()]);
+        let file = load_state_file(&path);
+        assert!(!file.vaults.contains_key("laptop"));
+        assert_eq!(file.vaults.get("server"), Some(&b));
+        assert!(file.sync_off.iter().any(|x| x == "laptop"));
+
+        // Idempotent — no duplicate marker.
+        let off = toggle_sync_off(&path, Some("laptop"), true).unwrap();
+        assert_eq!(off, vec!["laptop".to_string()]);
+
+        // Back on removes only that marker.
+        let off = toggle_sync_off(&path, Some("laptop"), false).unwrap();
+        assert!(off.is_empty());
+    }
+
+    #[test]
+    fn sync_off_global_off_specific_on() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("sync-state.json");
+
+        // Global off.
+        let off = toggle_sync_off(&path, None, true).unwrap();
+        assert_eq!(off, vec![SYNC_OFF_ALL.to_string()]);
+
+        // Turning one vault back on does not clear the global off.
+        let off = toggle_sync_off(&path, Some("laptop"), false).unwrap();
+        assert_eq!(off, vec![SYNC_OFF_ALL.to_string()]);
+
+        // Global on clears everything.
+        let off = toggle_sync_off(&path, None, false).unwrap();
+        assert!(off.is_empty());
     }
 
     #[test]

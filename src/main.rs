@@ -6,7 +6,9 @@
 use clap::Parser;
 use std::process::ExitCode;
 
-use termius_secure_backup::cli::{Cli, Command, GdriveAction, Globals, SnapshotsAction};
+use termius_secure_backup::cli::{
+    Cli, Command, GdriveAction, Globals, SnapshotsAction, SyncCommand,
+};
 use termius_secure_backup::error::ExitCode as AppExitCode;
 use termius_secure_backup::util;
 use termius_secure_backup::{
@@ -218,21 +220,61 @@ fn run_gdrive(g: &Refs, action: GdriveAction) -> termius_secure_backup::error::R
             })?;
             eprintln!("Done: restored into {}", p.display());
         }
-        GdriveAction::Sync(a) => {
-            sync::run_sync(sync::SyncOptions {
-                termius_dir: g.termius_dir(),
-                name: a.name.as_deref(),
-                password_file: g.password_file(),
-                password_env: g.password_env(),
-                creds_path: &creds,
-                yes: g.yes,
-                interval: a.interval,
-                keep: a.keep,
-                once: a.once,
-                last_sig: None,
-                kdf: crypto::KdfParams::default(),
-            })?;
-        }
+        GdriveAction::Sync(a) => match a.command {
+            Some(SyncCommand::Off(t)) => {
+                sync::sync_off(t.name.as_deref())?;
+                match t.name.as_deref() {
+                    Some(n) => println!(
+                        "Continuous sync turned off for vault '{n}' — I will \
+                         stop suggesting it after backups. Re-enable with \
+                         'gdrive sync on'."
+                    ),
+                    None => println!(
+                        "Continuous sync turned off for all vaults — I will \
+                         stop suggesting it after backups. Re-enable with \
+                         'gdrive sync on'."
+                    ),
+                }
+                eprintln!(
+                    "Explicit 'gdrive sync' runs (and any systemd timer) are \
+                     unaffected; a future sync of a turned-off vault starts \
+                     from a fresh baseline."
+                );
+            }
+            Some(SyncCommand::On(t)) => {
+                let remaining = sync::sync_on(t.name.as_deref())?;
+                match t.name.as_deref() {
+                    Some(n) => {
+                        println!("Continuous sync turned back on for vault '{n}'.");
+                        if remaining.iter().any(|x| x == "*") {
+                            eprintln!(
+                                "Note: sync is still off for all other vaults — \
+                                 run 'gdrive sync on' without a name to turn \
+                                 that back on."
+                            );
+                        }
+                    }
+                    None => {
+                        println!("Continuous sync turned back on for all vaults.");
+                    }
+                }
+            }
+            None => {
+                sync::run_sync(sync::SyncOptions {
+                    termius_dir: g.termius_dir(),
+                    name: a.name.as_deref(),
+                    password_file: g.password_file(),
+                    password_env: g.password_env(),
+                    creds_path: &creds,
+                    yes: g.yes,
+                    interval: a.interval,
+                    keep: a.keep,
+                    once: a.once,
+                    last_sig: None,
+                    kdf: crypto::KdfParams::default(),
+                })?;
+            }
+        },
     }
     Ok(())
 }
