@@ -678,7 +678,9 @@ struct DriveFile {
     /// Drive reports size as a decimal string.
     #[serde(default)]
     size: Option<String>,
-    #[serde(default)]
+    /// Drive sends `createdTime` (camelCase) — the rename is required or
+    /// every date deserializes to `None` and newest-first sorting breaks.
+    #[serde(rename = "createdTime", default)]
     created_time: Option<String>,
 }
 
@@ -1954,6 +1956,10 @@ mod tests {
         assert_eq!(vaults.len(), 1);
         assert_eq!(vaults[0].name, "termius.tsbak-vault");
         assert_eq!(vaults[0].backup_count, 1);
+        // The backup's createdTime must survive deserialization (the
+        // serde rename), or the "last backup" label and newest-first
+        // ordering are wrong.
+        assert_eq!(vaults[0].last_backup, parse_rfc3339("2026-01-01T00:00:00Z"));
 
         // The list_vaults query must request mimeType in `fields` — the
         // real API only returns what was asked for, and the folder filter

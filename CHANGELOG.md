@@ -25,6 +25,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   folder was discarded. The query now requests `mimeType`, and the
   offline test fake honors `fields` like the real API, so this class of
   bug is caught without a live Drive.
+- Vault and backup dates never displayed: Drive's `createdTime` field was
+  deserialized without a serde rename, so it silently came out `None` —
+  vaults listed as "(last backup: no backups, N backup(s))" and the
+  newest-first ordering of vaults and backups degraded to API order.
+  `gdrive restore` now shows real timestamps and sorts correctly.
 
 ## [0.3.0] - 2026-08-31
 
