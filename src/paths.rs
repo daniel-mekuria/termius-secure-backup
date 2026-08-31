@@ -8,6 +8,61 @@ use std::path::{Path, PathBuf};
 use crate::error::{Error, Result};
 use crate::prompt;
 
+/// The per-user config directory. On Windows the classic `%APPDATA%`
+/// environment variable is honored first: `dirs::config_dir()` there
+/// resolves the Roaming AppData *known folder* via `SHGetKnownFolderPath`,
+/// which ignores environment variables and fails (returns `None`) when the
+/// folder is not materialized on disk — observed on the `windows-latest`
+/// CI runners — even though the environment variable still names it. The
+/// variable and the known folder point at the same directory for regular
+/// users, so behavior is unchanged. On Linux/macOS `dirs` already honors
+/// `$XDG_CONFIG_HOME`/`$HOME`, so it is used directly.
+fn config_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        std::env::var_os("APPDATA")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .or_else(dirs::config_dir)
+    }
+    #[cfg(not(windows))]
+    {
+        dirs::config_dir()
+    }
+}
+
+/// The per-user local (non-roaming) data directory. Same environment-first
+/// treatment as [`config_dir`] for `LOCALAPPDATA`.
+fn local_data_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        std::env::var_os("LOCALAPPDATA")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .or_else(dirs::data_local_dir)
+    }
+    #[cfg(not(windows))]
+    {
+        dirs::data_local_dir()
+    }
+}
+
+/// The user's home directory. Same environment-first treatment as
+/// [`config_dir`] for `USERPROFILE`.
+fn home_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        std::env::var_os("USERPROFILE")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .or_else(dirs::home_dir)
+    }
+    #[cfg(not(windows))]
+    {
+        dirs::home_dir()
+    }
+}
+
 /// The default Termius desktop `userData` directory for the current OS.
 ///
 /// These are the standard Electron paths used by the direct (non-sandboxed)
@@ -19,11 +74,11 @@ use crate::prompt;
 /// Sandboxed builds (Mac App Store, Snap) use different paths; callers may
 /// override with an explicit `--termius-dir`.
 pub fn default_termius_dir() -> Result<PathBuf> {
-    let base = dirs::config_dir().ok_or_else(|| {
+    let base = config_dir().ok_or_else(|| {
         Error::NotFound("could not determine the user config directory for this OS".to_string())
     })?;
-    // On macOS `dirs::config_dir()` returns `~/Library/Application Support`,
-    // on Windows `%APPDATA%`, on Linux `~/.config` — all correct for Termius.
+    // On macOS that is `~/Library/Application Support`, on Windows
+    // `%APPDATA%`, on Linux `~/.config` — all correct for Termius.
     Ok(base.join("Termius"))
 }
 
@@ -114,10 +169,10 @@ fn interactive_termius_dir(default: &Path, original: Error) -> Result<PathBuf> {
 /// Expand a leading `~` to the user's home directory.
 fn expand_tilde(p: &str) -> PathBuf {
     if p == "~" {
-        return dirs::home_dir().unwrap_or_else(|| PathBuf::from(p));
+        return home_dir().unwrap_or_else(|| PathBuf::from(p));
     }
     if let Some(rest) = p.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = home_dir() {
             return home.join(rest);
         }
     }
@@ -129,9 +184,9 @@ fn expand_tilde(p: &str) -> PathBuf {
 /// - macOS/Linux: `~/.termius-secure-backup/snapshots`
 /// - Windows:     `%LOCALAPPDATA%\termius-secure-backup\snapshots`
 pub fn default_snapshots_dir() -> Result<PathBuf> {
-    // On all three OSes `dirs::data_local_dir()` gives a per-user, non-roaming
+    // On all three OSes [`local_data_dir`] gives a per-user, non-roaming
     // location appropriate for large, machine-local rollback data.
-    let base = dirs::data_local_dir().ok_or_else(|| {
+    let base = local_data_dir().ok_or_else(|| {
         Error::NotFound("could not determine a local data directory for this OS".to_string())
     })?;
     Ok(base.join("termius-secure-backup").join("snapshots"))
@@ -158,14 +213,14 @@ pub fn snapshots_index_path(snapshots_dir: &Path) -> PathBuf {
 /// `~/Library/Application Support/termius-secure-backup/gdrive-creds.tsb`
 /// (macOS), `%APPDATA%\termius-secure-backup\gdrive-creds.tsb` (Windows).
 pub fn gdrive_creds_path() -> Result<PathBuf> {
-    let base = dirs::config_dir().ok_or_else(|| {
+    let base = config_dir().ok_or_else(|| {
         Error::NotFound("could not determine the user config directory for this OS".to_string())
     })?;
     Ok(base.join("termius-secure-backup").join("gdrive-creds.tsb"))
 }
 
 /// Resolve the credential store path, applying an override if given. The
-/// directory need not exist yet.
+/// directory need not exist yet (the `.tsb` writer creates it).
 pub fn resolve_gdrive_creds_path(override_path: Option<&Path>) -> Result<PathBuf> {
     Ok(match override_path {
         Some(p) => p.to_path_buf(),
@@ -181,7 +236,7 @@ pub fn resolve_gdrive_creds_path(override_path: Option<&Path>) -> Result<PathBuf
 /// `~/Library/Application Support/termius-secure-backup/sync-state.json`
 /// (macOS), `%APPDATA%\termius-secure-backup\sync-state.json` (Windows).
 pub fn sync_state_path() -> Result<PathBuf> {
-    let base = dirs::config_dir().ok_or_else(|| {
+    let base = config_dir().ok_or_else(|| {
         Error::NotFound("could not determine the user config directory for this OS".to_string())
     })?;
     Ok(base.join("termius-secure-backup").join("sync-state.json"))
@@ -193,7 +248,7 @@ mod tests {
 
     #[test]
     fn expand_tilde_home() {
-        let home = dirs::home_dir().unwrap();
+        let home = home_dir().unwrap();
         assert_eq!(expand_tilde("~"), home);
         assert_eq!(
             expand_tilde("~/config/Termius"),

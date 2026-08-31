@@ -17,10 +17,11 @@ fn creds_in(tmp: &tempfile::TempDir) -> std::path::PathBuf {
     tmp.path().join("gdrive-creds.tsb")
 }
 
-/// Run the binary with the user config directory redirected into `tmp`,
-/// so the on/off state file never touches a developer's real one.
-/// (HOME + XDG_CONFIG_HOME cover Linux/macOS; USERPROFILE + APPDATA
-/// cover Windows.)
+/// Run the binary with the user directories redirected into `tmp`, so the
+/// sync-state file never touches a developer's real one.
+/// (HOME + XDG_CONFIG_HOME cover Linux/macOS; the tool reads
+/// USERPROFILE/APPDATA/LOCALAPPDATA first on Windows, where `dirs`'
+/// known-folder API ignores the environment — see `paths::config_dir`.)
 fn isolated(tmp: &tempfile::TempDir) -> Command {
     let base = tmp.path();
     let mut cmd = Command::cargo_bin("termius-backup").expect("binary present");
@@ -28,6 +29,7 @@ fn isolated(tmp: &tempfile::TempDir) -> Command {
     cmd.env("XDG_CONFIG_HOME", base.join("config"));
     cmd.env("USERPROFILE", base);
     cmd.env("APPDATA", base.join("appdata"));
+    cmd.env("LOCALAPPDATA", base.join("localappdata"));
     cmd
 }
 

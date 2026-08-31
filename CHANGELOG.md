@@ -52,6 +52,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   vaults listed as "(last backup: no backups, N backup(s))" and the
   newest-first ordering of vaults and backups degraded to API order.
   `gdrive restore` now shows real timestamps and sorts correctly.
+- On Windows, `gdrive sync off` / `on` and every command that looks up
+  the per-user config directory could fail with "could not determine the
+  user config directory for this OS": the `dirs` crate resolves that
+  directory through the Win32 known-folder API, which ignores
+  `%APPDATA%` / `%LOCALAPPDATA%` / `%USERPROFILE%` and fails when the
+  Roaming AppData folder is not materialized on disk (as on the
+  `windows-latest` CI runners). The classic environment variables are
+  now honored first on Windows (they name the same directories, so
+  nothing changes for regular users) with the known-folder API as the
+  fallback.
 
 ## [0.3.0] - 2026-08-31
 
