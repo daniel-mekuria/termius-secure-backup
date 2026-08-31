@@ -75,21 +75,31 @@ pub fn run(opts: Options<'_>) -> Result<PathBuf> {
         eprintln!("No existing Termius directory to snapshot; proceeding.");
     }
 
-    // Acquire the password and decrypt.
-    let password = acquire_password(opts.password_file, opts.password_env, false, opts.yes)?;
+    // Acquire the password and decrypt. A rejected password re-prompts
+    // (a TTY session gets several attempts); the snapshot hint prints
+    // once, after the final failure.
     eprintln!("Decrypting …");
-    let payload =
-        container::read_and_decrypt(opts.backup_file, password.as_bytes()).map_err(|e| {
+    let payload = crate::backup::acquire_and_decrypt(
+        opts.password_file,
+        opts.password_env,
+        /*confirm_reentry*/ false,
+        opts.yes,
+        |pw| container::read_and_decrypt(opts.backup_file, pw.as_bytes()),
+    )
+    .map_err(|e| {
+        // Password acquisition errors already describe themselves.
+        if !matches!(e, Error::PasswordRejected | Error::WeakPassword { .. }) {
             eprintln!("Decryption failed: {e}");
-            if let Some(m) = &snap_taken {
-                eprintln!(
-                    "Your previous data was preserved in snapshot {} — \
-                     use `rollback` to restore it.",
-                    m.id
-                );
-            }
-            e
-        })?;
+        }
+        if let Some(m) = &snap_taken {
+            eprintln!(
+                "Your previous data was preserved in snapshot {} — \
+                 use `rollback` to restore it.",
+                m.id
+            );
+        }
+        e
+    })?;
 
     // Unpack into a temp dir, verify, then swap into place.
     eprintln!("Unpacking …");
@@ -109,17 +119,6 @@ pub fn run(opts: Options<'_>) -> Result<PathBuf> {
     replace_dir(&dest, staging.path())?;
     eprintln!("Restore complete: {}", dest.display());
     Ok(dest)
-}
-
-/// Acquire a password for restore (no re-entry confirmation; just one prompt).
-fn acquire_password(
-    file: Option<&Path>,
-    env: Option<&str>,
-    confirm_reentry: bool,
-    skip_weak_gate: bool,
-) -> Result<String> {
-    // Reuse the backup module's acquisition logic for consistency.
-    crate::backup::acquire_password(file, env, confirm_reentry, skip_weak_gate)
 }
 
 /// Atomically replace `dest` with the contents of `staging` by renaming.

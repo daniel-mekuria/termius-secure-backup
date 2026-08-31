@@ -1061,19 +1061,44 @@ impl Session {
 }
 
 /// Load credentials (prompting for the master password) and open a session.
+/// A wrong master password re-prompts (up to
+/// [`prompt::MAX_PASSWORD_ATTEMPTS`] on a TTY). The password can instead be
+/// supplied via the `TSBAK_GDRIVE_MASTER_PASSWORD` environment variable for
+/// scripted use — one attempt, no prompt.
 pub fn open_session(creds_path: &Path) -> Result<Session> {
     if !creds_path.exists() {
         return Err(Error::NotLoggedIn);
     }
-    let master = prompt::read_password("Google Drive master password: ")?;
-    Session::open(creds_path, master.as_bytes())
+    if let Ok(m) = std::env::var("TSBAK_GDRIVE_MASTER_PASSWORD") {
+        if !m.is_empty() {
+            return Session::open(creds_path, m.as_bytes());
+        }
+    }
+    let max_attempts = if std::io::stdin().is_terminal() {
+        prompt::MAX_PASSWORD_ATTEMPTS
+    } else {
+        1
+    };
+    prompt::with_password_retry(
+        || prompt::read_password("Google Drive master password: "),
+        |m| Session::open(creds_path, m.as_bytes()),
+        max_attempts,
+    )
 }
 
 /// Prompt for the master password (with re-entry + weak gate), then load
-/// and decrypt the credential store.
+/// and decrypt the credential store. A wrong password re-prompts.
 fn read_master_password(creds_path: &Path) -> Result<Creds> {
-    let pw = prompt::ask_password("master password (Google Drive credentials)", true, false)?;
-    load_creds(creds_path, pw.as_bytes())
+    let max_attempts = if std::io::stdin().is_terminal() {
+        prompt::MAX_PASSWORD_ATTEMPTS
+    } else {
+        1
+    };
+    prompt::with_password_retry(
+        || prompt::ask_password("master password (Google Drive credentials)", true, false),
+        |pw| load_creds(creds_path, pw.as_bytes()),
+        max_attempts,
+    )
 }
 
 /// `gdrive login`: device flow → store encrypted credentials.
@@ -1314,12 +1339,22 @@ pub fn run_restore(opts: RestoreOptions<'_>) -> Result<PathBuf> {
         eprintln!("No existing Termius directory to snapshot; proceeding.");
     }
 
-    // 7. Acquire the backup password and decrypt.
-    let password =
-        backup::acquire_password(opts.password_file, opts.password_env, false, opts.yes)?;
+    // 7. Acquire the backup password and decrypt. A rejected password
+    // re-prompts (a TTY session gets several attempts); the snapshot hint
+    // prints once, after the final failure.
     eprintln!("Decrypting …");
-    let payload = container::read_and_decrypt(tmp.path(), password.as_bytes()).map_err(|e| {
-        eprintln!("Decryption failed: {e}");
+    let payload = backup::acquire_and_decrypt(
+        opts.password_file,
+        opts.password_env,
+        /*confirm_reentry*/ false,
+        opts.yes,
+        |pw| container::read_and_decrypt(tmp.path(), pw.as_bytes()),
+    )
+    .map_err(|e| {
+        // Password acquisition errors already describe themselves.
+        if !matches!(e, Error::PasswordRejected | Error::WeakPassword { .. }) {
+            eprintln!("Decryption failed: {e}");
+        }
         if let Some(m) = &snap_taken {
             eprintln!(
                 "Your previous data was preserved in snapshot {} — \
