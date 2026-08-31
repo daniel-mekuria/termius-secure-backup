@@ -147,10 +147,11 @@ Back up to — and restore from — your own Google Drive. Google only offers
 OAuth for Drive access (no email+password login), so this uses **OAuth2**:
 the tool prints a short code you approve at `google.com/device` (device
 flow) — and if Google does not offer the device flow for the configured
-client, it automatically falls back to **browser login**: it opens the
-consent page and catches the redirect on a local loopback address
-(authorization code + PKCE). The resulting refresh token is **encrypted at
-rest** with a master password you choose.
+client, it automatically falls back to **browser login**: it prints the
+consent URL (press Enter to open it in your browser) and catches the
+redirect on a local loopback address (authorization code + PKCE). The
+resulting refresh token is **encrypted at rest** with a master password
+you choose.
 
 ```sh
 termius-backup gdrive login
@@ -243,9 +244,10 @@ shell variable after `gdrive login`.
 works well over SSH. Some Google clients are not eligible for the device
 flow; when Google rejects it with `invalid_client`, the tool
 automatically falls back to **browser login** (authorization-code flow
-with PKCE): it opens the consent page in your browser and catches the
-redirect on a local loopback address (`http://127.0.0.1:<port>`), the
-same scheme `gh` and `gcloud` use. Either way the result is a refresh
+with PKCE): it prints the consent URL — press Enter and it opens in your
+browser (or open the URL yourself) — and catches the redirect on a local
+loopback address (`http://127.0.0.1:<port>`), the same scheme `gh` and
+`gcloud` use. Either way the result is a refresh
 token, which is then encrypted at rest with your master password.
 
 The scope requested is `drive.file` — least privilege, covering only files

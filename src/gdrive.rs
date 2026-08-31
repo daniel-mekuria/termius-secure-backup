@@ -10,7 +10,7 @@
 //! - **Backup password** — encrypts each `.tsb` (prompted per backup/restore,
 //!   identical to the local flow).
 
-use std::io::{Read, Write};
+use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 
 use base64::Engine;
@@ -537,11 +537,17 @@ pub fn auth_code_loopback(client_id: &str, client_secret: Option<&str>) -> Resul
         state,
         url_encode(&pkce_challenge(&verifier)),
     );
-    eprintln!("A browser window will open to authorize this tool.");
-    eprintln!("If none opens, visit this URL manually:");
+    eprintln!("Visit this URL in a browser to authorize this tool:");
     eprintln!("  {url}");
-    eprintln!("Then return to this terminal.");
-    let _opened = open_browser(&url);
+    if std::io::stdin().is_terminal() {
+        eprintln!("Press Enter to open it in your browser …");
+        let mut line = String::new();
+        let _ = std::io::stdin().read_line(&mut line);
+        if !open_browser(&url) {
+            eprintln!("(could not launch a browser automatically — open the URL above yourself)");
+        }
+    }
+    eprintln!("Waiting for the browser to redirect back …");
     let code = accept_callback(&listener, &state)?;
     let mut body = format!(
         "client_id={}&grant_type=authorization_code&code={}&redirect_uri={}&code_verifier={}",
