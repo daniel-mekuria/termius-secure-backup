@@ -755,7 +755,7 @@ impl GdriveClient for HttpGdriveClient {
         ));
         let resp = self
             .authed(ureq::get(&format!(
-                "{}/files?q={q}&pageSize=1000&fields=files(id,name)",
+                "{}/files?q={q}&pageSize=1000&fields=files(id,name,mimeType)",
                 self.drive_api
             )))
             .call()?;
@@ -1882,11 +1882,20 @@ mod tests {
                 } else if line.contains("alt=media") {
                     marker.clone()
                 } else if line.starts_with("GET") {
-                    // "name contains …" (list_vaults) → the folder;
-                    // "name = …" (ensure_vault lookup) → nothing yet.
+                    // "name contains …" (list_vaults) → the folder (plus a
+                    // same-named decoy file); "name = …" (ensure_vault
+                    // lookup) → nothing yet. Like the real API, mimeType is
+                    // only in the response if the `fields` parameter asked
+                    // for it — forgetting it made list_vaults drop every
+                    // vault.
                     if line.contains("contains") {
-                        r#"{"files":[{"id":"folder-1","name":"termius.tsbak-vault","mimeType":"application/vnd.google-apps.folder"}]}"#
-                            .to_string()
+                        if line.contains("fields=files(id,name,mimeType)") {
+                            r#"{"files":[{"id":"folder-1","name":"termius.tsbak-vault","mimeType":"application/vnd.google-apps.folder"},{"id":"file-1","name":"copy.tsbak-vault","mimeType":"application/octet-stream"}]}"#
+                                .to_string()
+                        } else {
+                            r#"{"files":[{"id":"folder-1","name":"termius.tsbak-vault"},{"id":"file-1","name":"copy.tsbak-vault"}]}"#
+                                .to_string()
+                        }
                     } else {
                         r#"{"files":[]}"#.to_string()
                     }
@@ -1945,5 +1954,20 @@ mod tests {
         assert_eq!(vaults.len(), 1);
         assert_eq!(vaults[0].name, "termius.tsbak-vault");
         assert_eq!(vaults[0].backup_count, 1);
+
+        // The list_vaults query must request mimeType in `fields` — the
+        // real API only returns what was asked for, and the folder filter
+        // discards any entry whose mimeType is missing (this is how every
+        // vault became invisible when the field was forgotten).
+        let reqs = requests.lock().unwrap();
+        let list_line = reqs
+            .iter()
+            .find(|(line, _)| line.starts_with("GET") && line.contains("contains"))
+            .expect("list_vaults query was made");
+        assert!(
+            list_line.0.contains("fields=files(id,name,mimeType)"),
+            "list_vaults must request mimeType, got: {}",
+            list_line.0
+        );
     }
 }

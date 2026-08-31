@@ -17,6 +17,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--termius-dir` always overrides the saved path, and a saved path that
   no longer exists falls back to the normal auto-detection.
 
+### Fixed
+- `gdrive restore` reported "no backup vaults found" even when the vault
+  (and its `.tsbak-vault` marker) was on Drive: the vault-search query
+  filtered on `mimeType` but never asked for that field in the API's
+  `fields` parameter, so the API's response never contained it and every
+  folder was discarded. The query now requests `mimeType`, and the
+  offline test fake honors `fields` like the real API, so this class of
+  bug is caught without a live Drive.
+
 ## [0.3.0] - 2026-08-31
 
 ### Added
