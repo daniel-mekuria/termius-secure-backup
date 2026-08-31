@@ -1,42 +1,27 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Password strength assessment and the weak-password re-confirmation gate.
+//!
+//! Uses [zxcvbn], the standard password-strength estimator: it matches
+//! dictionary words, keyboard patterns, sequences, dates, and leetspeak
+//! substitutions, and reports the order of magnitude of guesses an offline
+//! attacker would need (`guesses_log10`). Backups are protected by
+//! Argon2id, so an attacker with a stolen `.tsb` file brute-forces the
+//! password offline — the bar is therefore "at least 10^8 guesses"
+//! (zxcvbn score ≥ 3, which zxcvbn itself documents as the floor:
+//! "any score less than 3 should be considered too weak").
+
+use zxcvbn::Score;
 
 /// Minimum acceptable length before a password is even considered "strong".
+/// A hard floor on top of the zxcvbn score: 12 characters rules out
+/// short-but-random passwords that score well but are a typing-error away
+/// from being forgotten.
 pub const MIN_LENGTH: usize = 12;
 
-/// A small blocklist of trivially weak passwords.
-const COMMON: &[&str] = &[
-    "password",
-    "password1",
-    "password123",
-    "123456",
-    "12345678",
-    "123456789",
-    "1234567890",
-    "qwerty",
-    "qwerty123",
-    "abc123",
-    "letmein",
-    "welcome",
-    "admin",
-    "admin123",
-    "iloveyou",
-    "monkey",
-    "dragon",
-    "termius",
-    "termius123",
-    "passw0rd",
-    "p@ssw0rd",
-    "changeme",
-    "secret",
-    "root",
-    "toor",
-    "111111",
-    "000000",
-    "asdfasdf",
-    "guest",
-];
+/// The password must require at least 10^MIN_GUESSES_LOG10 guesses
+/// (zxcvbn score ≥ 3).
+const MIN_GUESSES_LOG10: f64 = 8.0;
 
 /// The result of a strength assessment.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,145 +35,67 @@ pub enum Strength {
 /// Why a password was judged weak.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WeakReason {
+    /// Fewer than [`MIN_LENGTH`] characters.
     TooShort,
-    Common,
-    LowEntropy,
-    Repeating,
+    /// zxcvbn estimates it can be cracked in fewer than
+    /// 10^`MIN_GUESSES_LOG10` guesses; `detail` is zxcvbn's own
+    /// plain-language explanation (warning + first suggestion).
+    Guessable { detail: String },
 }
 
 impl std::fmt::Display for WeakReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            WeakReason::TooShort => write!(f, "password is shorter than {MIN_LENGTH} characters"),
-            WeakReason::Common => write!(f, "password is a commonly-used weak password"),
-            WeakReason::LowEntropy => {
-                write!(f, "password has low character diversity / entropy")
+            WeakReason::TooShort => {
+                write!(f, "password is shorter than {MIN_LENGTH} characters.")
             }
-            WeakReason::Repeating => {
-                write!(
-                    f,
-                    "password is mostly a single repeated character or pattern"
-                )
-            }
+            WeakReason::Guessable { detail } => write!(f, "{detail}"),
         }
     }
 }
 
-/// Assess a password's strength. Checks run from most specific to most
-/// coarse, so a structural weakness (common word, repetition) is reported
-/// before a generic low-entropy verdict.
+/// Assess a password's strength. The length floor runs first, then zxcvbn:
+/// a weak verdict carries zxcvbn's explanation so the prompt can tell the
+/// user exactly what is wrong (e.g. "This is a top-10 common password.").
 pub fn assess(pw: &[u8]) -> Strength {
     if pw.len() < MIN_LENGTH {
         return Strength::Weak {
             reason: WeakReason::TooShort,
         };
     }
-    let lower = String::from_utf8_lossy(pw).to_lowercase();
-    if is_common(&lower) {
-        return Strength::Weak {
-            reason: WeakReason::Common,
-        };
-    }
-    if is_repeating(&lower) {
-        return Strength::Weak {
-            reason: WeakReason::Repeating,
-        };
-    }
-    // Character-class diversity as a rough entropy proxy.
-    let mut classes = 0u32;
-    if lower.chars().any(|c| c.is_ascii_lowercase()) {
-        classes += 1;
-    }
-    if pw.iter().any(|b| b.is_ascii_digit()) {
-        classes += 1;
-    }
-    if pw.iter().any(|b| b.is_ascii_punctuation()) {
-        classes += 1;
-    }
-    if pw.iter().any(|b| b.is_ascii_uppercase()) {
-        classes += 1;
-    }
-    if classes < 2 {
-        return Strength::Weak {
-            reason: WeakReason::LowEntropy,
-        };
-    }
-    // A rough Shannon-entropy floor (bits per char × length).
-    if shannon_bits(pw) < 40.0 {
-        return Strength::Weak {
-            reason: WeakReason::LowEntropy,
-        };
-    }
-    Strength::Strong
-}
-
-/// True if the password is a known weak password, or a known weak base with
-/// a trivial numeric suffix (e.g. "password12345"). A common base with any
-/// number of trailing digits, or a trailing run of digits/symbols on a
-/// common base, is still trivially weak.
-fn is_common(lower: &str) -> bool {
-    if COMMON.contains(&lower) {
-        return true;
-    }
-    // Strip a trailing run of digits and re-check the base.
-    let trimmed = lower.trim_end_matches(|c: char| c.is_ascii_digit());
-    if trimmed.len() >= 4 && trimmed != lower {
-        let stripped = trimmed.trim_end_matches(|c: char| c.is_ascii_punctuation());
-        for c in COMMON {
-            if *c == stripped || *c == trimmed {
-                return true;
-            }
+    let text = String::from_utf8_lossy(pw);
+    let result = zxcvbn::zxcvbn(&text, &[]);
+    if result.guesses_log10() >= MIN_GUESSES_LOG10 && result.score() >= Score::Three {
+        Strength::Strong
+    } else {
+        Strength::Weak {
+            reason: WeakReason::Guessable {
+                detail: explain_weak(&result),
+            },
         }
     }
-    false
 }
 
-/// True if the password is a single repeated character, a short-period
-/// pattern, or overwhelmingly dominated by one character.
-fn is_repeating(s: &str) -> bool {
-    let chars: Vec<char> = s.chars().collect();
-    if chars.is_empty() {
-        return false;
-    }
-    // All same character.
-    if chars.iter().all(|c| *c == chars[0]) {
-        return true;
-    }
-    // Overwhelmingly one character (>= 80%).
-    let mut counts: std::collections::HashMap<char, u32> = std::collections::HashMap::new();
-    for c in &chars {
-        *counts.entry(*c).or_insert(0) += 1;
-    }
-    let max = *counts.values().max().unwrap_or(&0) as f64;
-    if max / chars.len() as f64 >= 0.8 {
-        return true;
-    }
-    // Short period repetition like "abcabcabc".
-    for period in 1..=(chars.len() / 2) {
-        if chars.len() % period != 0 {
-            continue;
+/// Build the user-facing explanation for a weak password from zxcvbn's
+/// feedback (e.g. `This is a top-10 common password. Add another word or
+/// two.`). Falls back to a generic message when zxcvbn gives none.
+fn explain_weak(result: &zxcvbn::Entropy) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(fb) = result.feedback() {
+        if let Some(w) = fb.warning() {
+            parts.push(w.to_string());
         }
-        let pattern = &chars[..period];
-        if chars.chunks(period).all(|chunk| chunk == pattern) {
-            return true;
+        if let Some(s) = fb.suggestions().first() {
+            parts.push(s.to_string());
         }
     }
-    false
-}
-
-fn shannon_bits(pw: &[u8]) -> f64 {
-    use std::collections::HashMap;
-    let mut counts: HashMap<u8, u64> = HashMap::new();
-    for b in pw {
-        *counts.entry(*b).or_insert(0) += 1;
+    if parts.is_empty() {
+        parts.push(format!(
+            "password is too easy to guess (estimated strength 10^{:.1} guesses; at least 10^{MIN_GUESSES_LOG10:.0} needed).",
+            result.guesses_log10()
+        ));
     }
-    let total = pw.len() as f64;
-    let mut entropy_per_char = 0.0f64;
-    for &c in counts.values() {
-        let p = c as f64 / total;
-        entropy_per_char -= p * p.log2();
-    }
-    entropy_per_char * total
+    parts.join(" ")
 }
 
 #[cfg(test)]
@@ -203,46 +110,82 @@ mod tests {
                 reason: WeakReason::TooShort
             }
         );
+        // The 11-char password used in the non-interactive CLI test:
+        // too short, so it warns and proceeds via --yes.
+        assert_eq!(
+            assess(b"weakpass123"),
+            Strength::Weak {
+                reason: WeakReason::TooShort
+            }
+        );
     }
 
     #[test]
     fn common_password_is_weak() {
-        assert_eq!(
-            assess(b"password12345"),
-            Strength::Weak {
-                reason: WeakReason::Common
-            }
+        let r = assess(b"password12345");
+        assert!(
+            matches!(
+                r,
+                Strength::Weak {
+                    reason: WeakReason::Guessable { .. }
+                }
+            ),
+            "password12345 should be guessable, got {r:?}"
         );
     }
 
     #[test]
-    fn single_char_class_is_weak() {
-        // only lowercase, no digits/symbols -> low diversity
-        assert_eq!(
+    fn sequence_is_weak() {
+        assert!(matches!(
             assess(b"abcdefghijkm"),
             Strength::Weak {
-                reason: WeakReason::LowEntropy
+                reason: WeakReason::Guessable { .. }
             }
-        );
+        ));
     }
 
     #[test]
     fn repeating_is_weak() {
-        assert_eq!(
+        assert!(matches!(
             assess(b"aaaaaaaaaaaa1"),
             Strength::Weak {
-                reason: WeakReason::Repeating
+                reason: WeakReason::Guessable { .. }
             }
-        );
+        ));
     }
 
     #[test]
     fn pattern_repeat_is_weak() {
-        assert_eq!(
+        assert!(matches!(
             assess(b"abcabcabcabc"),
             Strength::Weak {
-                reason: WeakReason::Repeating
+                reason: WeakReason::Guessable { .. }
             }
+        ));
+    }
+
+    #[test]
+    fn keyboard_pattern_is_weak() {
+        assert!(matches!(
+            assess(b"qweqweqweqwe12"),
+            Strength::Weak {
+                reason: WeakReason::Guessable { .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn weak_reason_message_is_actionable() {
+        // The user should see zxcvbn's plain-language explanation, not a
+        // bare "weak" verdict.
+        let Strength::Weak { reason } = assess(b"password12345") else {
+            panic!("expected weak");
+        };
+        let s = reason.to_string();
+        assert!(!s.is_empty());
+        assert!(
+            s.to_lowercase().contains("common") || s.to_lowercase().contains("password"),
+            "message should explain why: {s}"
         );
     }
 
@@ -250,5 +193,12 @@ mod tests {
     fn strong_password_ok() {
         assert_eq!(assess(b"correct-horse-battery-9"), Strength::Strong);
         assert_eq!(assess(b"Tr0ub4dor&3-is-OK"), Strength::Strong);
+        assert_eq!(assess(b"xK9#mQ2$vL7@wP4z"), Strength::Strong);
+    }
+
+    #[test]
+    fn score_three_boundary_is_strong() {
+        // 10^8 guesses (zxcvbn score 3) is the floor — it passes.
+        assert_eq!(assess(b"P@ssw0rd!2026x"), Strength::Strong);
     }
 }

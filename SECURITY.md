@@ -22,8 +22,12 @@ offline attacker who has a copy of the file but **not** the password.
 ## What is *not* in scope
 
 - The strength of the user's password is the foundation. A weak password
-  can be brute-forced. The tool warns and asks for re-confirmation when a
-  weak password is used, but it will proceed if you insist.
+  can be brute-forced. The tool estimates strength with
+  [zxcvbn](https://crates.io/crates/zxcvbn) (dictionary, sequence,
+  keyboard-pattern, and leetspeak analysis) and asks
+  for explicit re-confirmation when the password is shorter than 12
+  characters or can be guessed in fewer than 10^8 attempts, but it will
+  proceed if you insist.
 - The **live** Termius directory is read from disk in plaintext — the
   rollback snapshots it produces are also stored **unencrypted**, because
   they are only ever copies of data that already lives on disk in the
