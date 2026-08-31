@@ -69,23 +69,32 @@ uses a different path — pass it with --termius-dir <PATH>.",
 
 /// Ask the user where their Termius data actually lives, and keep asking
 /// until they give an existing directory (or confirm a not-yet-created one,
-/// which is fine for restores onto a fresh machine).
+/// which is fine for restores onto a fresh machine). Empty input re-prompts
+/// — Ctrl-C (or 10 consecutive empty inputs, e.g. repeated Ctrl-D) ends
+/// the run.
 fn interactive_termius_dir(default: &Path, original: Error) -> Result<PathBuf> {
     eprintln!("{original}");
+    let mut empty_runs = 0;
     loop {
         let input = prompt::ask_path(
             &format!(
                 "Enter the path to your Termius data directory \
-                 (the usual place is {}), or press Enter to give up:",
+                 (the usual place is {}):",
                 default.display()
             ),
             "",
         )?;
         if input.is_empty() {
-            return Err(Error::Canceled(
-                "no Termius data directory found, so there is nothing to back up".into(),
-            ));
+            empty_runs += 1;
+            if empty_runs >= 10 {
+                return Err(Error::Canceled(
+                    "no Termius data directory found, so there is nothing to back up".into(),
+                ));
+            }
+            eprintln!("a path is required — enter one to continue");
+            continue;
         }
+        empty_runs = 0;
         let p = expand_tilde(&input);
         if p.is_dir() {
             return Ok(p);

@@ -23,6 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   confirm. Restore now prints the one-line warning (as it already did for
   file / env-var passwords) and proceeds; the full gate still applies when
   creating a backup, where a stronger password can still be chosen.
+- The "or press Enter to give up" escape in the "where is Termius" prompt
+  is gone: empty input now re-prompts. Ctrl-C (or 10 consecutive empty
+  inputs, e.g. repeated Ctrl-D) exits.
 
 ### Fixed
 - Restoring a backup made while Termius was running failed with "restored
