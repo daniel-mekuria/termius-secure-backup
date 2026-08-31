@@ -217,6 +217,13 @@ termius-backup gdrive sync --name laptop
 termius-backup gdrive sync --name laptop --once
 ```
 
+- **The path is remembered**: `--termius-dir` is only needed once.
+  Whatever directory a sync run watches (from the flag, or from the
+  interactive "where is Termius" prompt) is saved in the sync state file,
+  and later `gdrive sync` runs — including `--once` from cron or a systemd
+  timer — reuse it without the flag, and say so when they do. An explicit
+  `--termius-dir` always overrides the saved path, and a saved path that no
+  longer exists falls back to the normal auto-detection.
 - **How change detection works**: every `--interval` seconds (default 60,
   minimum 5) the tool fingerprints the tree (file count + total size + newest
   mtime). An upload happens only once the tree has been *unchanged* for a few

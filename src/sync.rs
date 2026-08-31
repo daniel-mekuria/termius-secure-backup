@@ -23,7 +23,7 @@
 
 use std::collections::HashMap;
 use std::io::IsTerminal;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
@@ -96,6 +96,10 @@ struct SyncStateFile {
     /// vault out of an all-vaults off this way.
     #[serde(default)]
     sync_on: Vec<String>,
+    /// The Termius data directory the last sync run used, so later runs
+    /// (cron `--once`, after a reboot) don't need `--termius-dir` again.
+    #[serde(default)]
+    termius_dir: Option<String>,
 }
 
 /// Sentinel stored in `sync_off` for a global (all-vaults) off.
@@ -205,6 +209,28 @@ fn load_sync_state() -> SyncStateFile {
 pub fn record_sync_state(vault: &str, sig: DirSignature) {
     if let Ok(p) = paths::sync_state_path() {
         record_state_file(&p, vault, sig);
+    }
+}
+
+/// Remember `dir` as the Termius data directory for future sync runs, so
+/// `gdrive sync` / `--once` (cron, after a reboot) don't need
+/// `--termius-dir` again. Best-effort: a state-write failure never fails
+/// an otherwise-successful sync.
+pub fn remember_termius_dir(dir: &Path) {
+    if let Ok(p) = paths::sync_state_path() {
+        let mut file = load_state_file(&p);
+        file.termius_dir = dir.to_str().map(str::to_string);
+        if let Err(e) = save_state_file(&p, &file) {
+            eprintln!("warning: could not write sync state {}: {e}", p.display());
+        }
+    }
+}
+
+/// The Termius data directory a previous sync run used, if any.
+pub fn saved_termius_dir() -> Option<PathBuf> {
+    match paths::sync_state_path() {
+        Ok(p) => load_state_file(&p).termius_dir.map(PathBuf::from),
+        Err(_) => None,
     }
 }
 
@@ -389,9 +415,41 @@ fn since(t: time::OffsetDateTime, now: time::OffsetDateTime) -> Duration {
     }
 }
 
+/// Choose the sync source directory. An explicit `--termius-dir` always
+/// wins; otherwise a path saved by a previous run is reused — but only
+/// while it still exists, so a moved/deleted directory falls back to the
+/// usual resolution instead of sticking to a stale path. Returns
+/// `(directory, from_saved)`, or `None` when the caller should fall back
+/// to the auto-detected default (which may prompt on a TTY).
+fn pick_sync_termius_dir(
+    override_path: Option<&Path>,
+    saved: Option<&Path>,
+) -> Result<Option<(PathBuf, bool)>> {
+    if let Some(p) = override_path {
+        return Ok(Some((paths::resolve_termius_dir(Some(p))?, false)));
+    }
+    if let Some(s) = saved.filter(|p| p.is_dir()) {
+        return Ok(Some((s.to_path_buf(), true)));
+    }
+    Ok(None)
+}
+
+/// Resolve the directory the sync watches, honoring the saved path from a
+/// previous run when no `--termius-dir` was given.
+fn resolve_sync_termius_dir(override_path: Option<&Path>) -> Result<(PathBuf, bool)> {
+    match pick_sync_termius_dir(override_path, saved_termius_dir().as_deref())? {
+        Some(d) => Ok(d),
+        None => Ok((paths::resolve_termius_dir(None)?, false)),
+    }
+}
+
 /// Options for `gdrive sync`.
 #[derive(Debug, Clone)]
 pub struct SyncOptions<'a> {
+    /// Explicit `--termius-dir`. When absent, the directory saved by a
+    /// previous sync run is reused (if it still exists) before the
+    /// auto-detected default; whatever is resolved is remembered for the
+    /// next run.
     pub termius_dir: Option<&'a Path>,
     /// Vault name (prompts if absent).
     pub name: Option<&'a str>,
@@ -422,7 +480,10 @@ pub struct SyncOptions<'a> {
 /// setup failures (no creds, bad master password, unreadable Termius dir)
 /// are fatal. In `once` mode any upload failure is returned.
 pub fn run_sync(opts: SyncOptions<'_>) -> Result<()> {
-    let src = paths::resolve_termius_dir(opts.termius_dir)?;
+    let (src, from_saved) = resolve_sync_termius_dir(opts.termius_dir)?;
+    // Remember the directory we are about to watch so the next run (cron,
+    // after a reboot) doesn't need --termius-dir.
+    remember_termius_dir(&src);
     let policy = SyncPolicy::from_interval(opts.interval);
 
     // Unlock the stored Google credentials first, so a wrong master
@@ -470,6 +531,9 @@ pub fn run_sync(opts: SyncOptions<'_>) -> Result<()> {
             vault_name,
             policy.interval.as_secs()
         );
+    }
+    if from_saved {
+        eprintln!("Using the Termius path saved by a previous sync run — pass --termius-dir to override it.");
     }
     if opts.keep > 0 {
         eprintln!("Keeping the newest {} backup(s) in the vault.", opts.keep);
@@ -936,6 +1000,68 @@ mod tests {
         std::fs::write(&path, b"not json").unwrap();
         let file = load_state_file(&path);
         assert!(file.vaults.is_empty());
+    }
+
+    #[test]
+    fn sync_state_file_remembered_dir_round_trip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("sync-state.json");
+        let dir = tempfile::tempdir().unwrap();
+
+        let file = SyncStateFile {
+            termius_dir: dir.path().to_str().map(str::to_string),
+            ..SyncStateFile::default()
+        };
+        save_state_file(&path, &file).unwrap();
+        let loaded = load_state_file(&path);
+        assert_eq!(loaded.termius_dir.as_deref(), dir.path().to_str());
+
+        // A state file written by an older version (without the field)
+        // loads with no remembered directory.
+        std::fs::write(&path, r#"{"vaults":{}}"#).unwrap();
+        let loaded = load_state_file(&path);
+        assert!(loaded.termius_dir.is_none());
+    }
+
+    #[test]
+    fn pick_termius_dir_override_wins_over_saved() {
+        let tmp = tempfile::tempdir().unwrap();
+        let custom = tmp.path().join("custom");
+        let saved = tmp.path().join("saved");
+        std::fs::create_dir_all(&custom).unwrap();
+        std::fs::create_dir_all(&saved).unwrap();
+        let (d, from_saved) = pick_sync_termius_dir(Some(&custom), Some(&saved))
+            .unwrap()
+            .unwrap();
+        assert_eq!(d, custom);
+        assert!(!from_saved);
+    }
+
+    #[test]
+    fn pick_termius_dir_uses_saved_when_no_override() {
+        let tmp = tempfile::tempdir().unwrap();
+        let saved = tmp.path().join("saved");
+        std::fs::create_dir_all(&saved).unwrap();
+        let (d, from_saved) = pick_sync_termius_dir(None, Some(&saved)).unwrap().unwrap();
+        assert_eq!(d, saved);
+        assert!(from_saved);
+    }
+
+    #[test]
+    fn pick_termius_dir_stale_saved_falls_back() {
+        let tmp = tempfile::tempdir().unwrap();
+        let gone = tmp.path().join("never-created");
+        // A saved path that no longer exists (and no override) means "use
+        // the usual resolution" — the caller's fallback, not an error.
+        assert!(pick_sync_termius_dir(None, Some(&gone)).unwrap().is_none());
+        assert!(pick_sync_termius_dir(None, None).unwrap().is_none());
+    }
+
+    #[test]
+    fn pick_termius_dir_missing_override_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bogus = tmp.path().join("nope");
+        assert!(pick_sync_termius_dir(Some(&bogus), None).is_err());
     }
 
     #[test]

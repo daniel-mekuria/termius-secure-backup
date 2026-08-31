@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `gdrive sync` now remembers the Termius data directory it watches: a
+  path given with `--termius-dir` (or entered at the interactive
+  "where is Termius" prompt) is saved in
+  `~/.config/termius-secure-backup/sync-state.json`, and later
+  `gdrive sync` / `gdrive sync --once` runs (cron, after a reboot) reuse
+  it without the flag, saying so when they do. An explicit
+  `--termius-dir` always overrides the saved path, and a saved path that
+  no longer exists falls back to the normal auto-detection.
+
 ## [0.3.0] - 2026-08-31
 
 ### Added

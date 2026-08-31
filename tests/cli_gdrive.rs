@@ -105,7 +105,7 @@ fn gdrive_sync_without_login_fails_with_login_hint() {
     let termius = tmp.path().join("termius");
     fs::create_dir_all(&termius).unwrap();
     fs::write(termius.join("f.txt"), b"data").unwrap();
-    bin()
+    isolated(&tmp)
         .args([
             "gdrive",
             "sync",
@@ -120,6 +120,56 @@ fn gdrive_sync_without_login_fails_with_login_hint() {
         .assert()
         .failure()
         .code(3) // ExitCode::Auth
+        .stderr(predicate::str::contains("not logged in"));
+}
+
+/// An explicit `--termius-dir` is remembered in the state file, and a
+/// later `gdrive sync` run without the flag reuses it. Proven offline:
+/// the first run stops at "not logged in" (exit 3) *after* the path has
+/// been remembered; the second run without the flag must stop at the same
+/// "not logged in" — not fail earlier with exit 2 ("Termius data
+/// directory not found"), since no default directory exists in the
+/// isolated config dir.
+#[test]
+fn gdrive_sync_remembers_termius_dir_for_later_runs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let termius = tmp.path().join("termius");
+    fs::create_dir_all(&termius).unwrap();
+    fs::write(termius.join("f.txt"), b"data").unwrap();
+
+    // First run: explicit path.
+    isolated(&tmp)
+        .args([
+            "gdrive",
+            "sync",
+            "--name",
+            "test",
+            "--termius-dir",
+            &termius.display().to_string(),
+            "--creds-file",
+            &creds_in(&tmp).display().to_string(),
+            "--yes",
+        ])
+        .assert()
+        .failure()
+        .code(3);
+
+    // Second run: no --termius-dir. Saved path honored → exit 3, "not
+    // logged in". Saved path ignored → exit 2, directory not found.
+    isolated(&tmp)
+        .args([
+            "gdrive",
+            "sync",
+            "--once",
+            "--name",
+            "test",
+            "--creds-file",
+            &creds_in(&tmp).display().to_string(),
+            "--yes",
+        ])
+        .assert()
+        .failure()
+        .code(3)
         .stderr(predicate::str::contains("not logged in"));
 }
 
