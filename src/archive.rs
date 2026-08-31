@@ -3,20 +3,24 @@
 //! Archive (tar + zstd) packing/unpacking of the Termius data directory.
 //!
 //! The encrypted payload layout is:
-//! `zstd( tar([__meta.json, <tree of the termius dir>]) )`
+//! `zstd( tar([<tree of the termius dir>, __meta.json]) )`
 //!
-//! `__meta.json` is the first entry and carries provenance metadata so a
-//! restored tree can be verified. It lives *inside* the encrypted envelope,
-//! so it leaks nothing without the password.
+//! `__meta.json` carries provenance metadata so a restored tree can be
+//! verified. It lives *inside* the encrypted envelope, so it leaks nothing
+//! without the password. [`unpack`] finds it by name, so its position in
+//! the tar is not significant (archives made before the single-pass pack
+//! store it first; new ones append it after the tree).
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::path::Path;
 
 use crate::error::{Error, Result};
 use crate::util;
 
-/// Inner-metadata entry name, stored as the first tar entry.
+/// Inner-metadata entry name. Found by name at unpack time, so its position
+/// in the tar is not significant.
 pub const META_ENTRY_NAME: &str = "__meta.json";
 
 /// Zstandard compression level (1–19; 3 is a fast/balance default).
@@ -33,8 +37,22 @@ pub struct ArchiveMeta {
     pub created_at: String,
 }
 
+/// Accumulators for the single pack walk.
+#[derive(Default)]
+struct PackStats {
+    byte_size: u64,
+    entry_count: u64,
+}
+
 /// Pack `root` (a directory) into a zstd-compressed tar held in `out`.
 /// `created_at` is an ISO-8601 timestamp string.
+///
+/// The tree is walked exactly once: every entry is appended to the tar and
+/// fed into the tree hash as it goes, and each file's content is streamed
+/// into the tar and its content hash at the same time (each byte is read
+/// exactly once). The recorded `sha256_root` therefore always describes
+/// precisely what was packed — even when the source is a live directory
+/// (a running Termius) that keeps changing during the pack.
 pub fn pack(root: &Path, out: &mut Vec<u8>, created_at: &str) -> Result<ArchiveMeta> {
     if !root.is_dir() {
         return Err(Error::NotFound(format!(
@@ -42,26 +60,27 @@ pub fn pack(root: &Path, out: &mut Vec<u8>, created_at: &str) -> Result<ArchiveM
             root.display()
         )));
     }
-    let (byte_size, entry_count) = util::dir_stats(root)?;
-    let root_hash = tree_hash(root)?;
-    let meta = ArchiveMeta {
-        tool_version: env!("CARGO_PKG_VERSION").to_string(),
-        source_dir: root.display().to_string(),
-        entry_count,
-        byte_size,
-        sha256_root: root_hash,
-        created_at: created_at.to_string(),
-    };
 
-    let meta_bytes = serde_json::to_vec(&meta)?;
-
-    // Build the tar archive into a buffer, then zstd-compress it.
+    let mut root_hasher = Sha256::new();
+    let mut stats = PackStats::default();
     let mut tar_buf: Vec<u8> = Vec::new();
+    let meta;
     {
         let mut builder = tar::Builder::new(&mut tar_buf);
         builder.mode(tar::HeaderMode::Deterministic);
+        append_dir_recursive(&mut builder, root, root, &mut root_hasher, &mut stats)?;
 
-        // First entry: __meta.json
+        // __meta.json rides along as a tar entry after the tree;
+        // [`unpack`] finds it by name, so its position is not significant.
+        meta = ArchiveMeta {
+            tool_version: env!("CARGO_PKG_VERSION").to_string(),
+            source_dir: root.display().to_string(),
+            entry_count: stats.entry_count,
+            byte_size: stats.byte_size,
+            sha256_root: util::hex::encode_lower_owned(&root_hasher.finalize()),
+            created_at: created_at.to_string(),
+        };
+        let meta_bytes = serde_json::to_vec(&meta)?;
         let mut hdr = tar::Header::new_gnu();
         hdr.set_path(META_ENTRY_NAME)?;
         hdr.set_size(meta_bytes.len() as u64);
@@ -69,8 +88,6 @@ pub fn pack(root: &Path, out: &mut Vec<u8>, created_at: &str) -> Result<ArchiveM
         hdr.set_mtime(0);
         hdr.set_cksum();
         builder.append(&hdr, std::io::Cursor::new(&meta_bytes))?;
-
-        append_dir_recursive(&mut builder, root, root)?;
         builder.finish()?;
     }
 
@@ -81,22 +98,77 @@ pub fn pack(root: &Path, out: &mut Vec<u8>, created_at: &str) -> Result<ArchiveM
     Ok(meta)
 }
 
+/// A `Read` adapter that mirrors every byte it reads into a SHA-256
+/// hasher, so a file's content is read exactly once and feeds both the
+/// tar entry and the tree hash.
+struct TeeRead<'a> {
+    inner: &'a mut dyn Read,
+    hasher: &'a mut Sha256,
+}
+
+impl Read for TeeRead<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.hasher.update(&buf[..n]);
+        Ok(n)
+    }
+}
+
+/// Feed one tree entry into the hash: the relative path, a type byte
+/// (`l`/`d`/`f`), the entry size, then a type-specific payload (a file's
+/// content hash or a symlink's target; directories pass none — their
+/// children are hashed by the caller's recursion). This must stay in
+/// lockstep with what [`append_dir_recursive`] puts in the tar.
+fn hash_tree_entry(
+    hasher: &mut Sha256,
+    root: &Path,
+    path: &Path,
+    type_byte: u8,
+    len: u64,
+    payload: &[u8],
+) {
+    let rel = path
+        .strip_prefix(root)
+        .unwrap_or(path)
+        .display()
+        .to_string();
+    hasher.update(rel.as_bytes());
+    hasher.update([type_byte]);
+    hasher.update(len.to_le_bytes());
+    hasher.update(payload);
+}
+
 /// Append a directory tree to the tar builder, preserving permissions,
 /// mtimes, and symlinks. Paths are stored relative to `root`.
+///
+/// Every entry appended is also fed into `root_hasher` and counted in
+/// `stats` in the same walk, and each file's content is streamed into
+/// both the tar entry and its content hash via [`TeeRead`] — so the
+/// recorded hash always describes exactly what was packed, even when the
+/// source is a live directory (a running Termius) that changes while the
+/// pack is underway. Sockets and fifos are skipped: the tar format cannot
+/// carry them, so they are excluded from the hash as well (a restored
+/// tree likewise never contains them).
 fn append_dir_recursive(
     builder: &mut tar::Builder<&mut Vec<u8>>,
     root: &Path,
     current: &Path,
+    root_hasher: &mut Sha256,
+    stats: &mut PackStats,
 ) -> Result<()> {
     let mut entries: Vec<std::fs::DirEntry> =
         std::fs::read_dir(current)?.collect::<std::result::Result<_, _>>()?;
-    // Sort for deterministic archives.
+    // Sort for deterministic archives (and hash order).
     entries.sort_by_key(|e| e.file_name());
 
     for entry in entries {
         let path = entry.path();
         let rel = path.strip_prefix(root).unwrap_or(&path);
         let meta = std::fs::symlink_metadata(&path)?;
+        if !(meta.is_file() || meta.is_symlink() || meta.is_dir()) {
+            continue; // sockets, fifos: not representable in the tar
+        }
+        stats.entry_count += 1;
         let mtime = meta
             .modified()?
             .duration_since(std::time::UNIX_EPOCH)
@@ -105,15 +177,24 @@ fn append_dir_recursive(
 
         if meta.is_symlink() {
             let target = std::fs::read_link(&path)?;
+            let target_lossy = target.to_string_lossy().into_owned();
             let mut hdr = tar::Header::new_gnu();
             hdr.set_path(rel)?;
             hdr.set_entry_type(tar::EntryType::Symlink);
-            hdr.set_link_name(target.to_string_lossy().as_ref())?;
+            hdr.set_link_name(target_lossy.as_str())?;
             hdr.set_size(0);
             hdr.set_mode(perm_mode(&meta, false));
             hdr.set_mtime(mtime);
             hdr.set_cksum();
             builder.append(&hdr, std::io::empty())?;
+            hash_tree_entry(
+                root_hasher,
+                root,
+                &path,
+                b'l',
+                meta.len(),
+                target_lossy.as_bytes(),
+            );
         } else if meta.is_dir() {
             let mut hdr = tar::Header::new_gnu();
             hdr.set_path(rel)?;
@@ -123,18 +204,33 @@ fn append_dir_recursive(
             hdr.set_mtime(mtime);
             hdr.set_cksum();
             builder.append(&hdr, std::io::empty())?;
-            append_dir_recursive(builder, root, &path)?;
-        } else if meta.is_file() {
+            hash_tree_entry(root_hasher, root, &path, b'd', meta.len(), &[]);
+            append_dir_recursive(builder, root, &path, root_hasher, stats)?;
+        } else {
             let mut f = std::fs::File::open(&path)?;
+            let mut content_hash = Sha256::new();
+            let mut tee = TeeRead {
+                inner: &mut f,
+                hasher: &mut content_hash,
+            };
             let mut hdr = tar::Header::new_gnu();
             hdr.set_path(rel)?;
             hdr.set_size(meta.len());
             hdr.set_mode(perm_mode(&meta, false));
             hdr.set_mtime(mtime);
             hdr.set_cksum();
-            builder.append(&hdr, &mut f)?;
+            builder.append(&hdr, &mut tee)?;
+            let digest = content_hash.finalize();
+            hash_tree_entry(
+                root_hasher,
+                root,
+                &path,
+                b'f',
+                meta.len(),
+                util::hex::encode_lower_owned(&digest).as_bytes(),
+            );
+            stats.byte_size += meta.len();
         }
-        // Other types (sockets, fifos) are skipped.
     }
     Ok(())
 }
@@ -191,54 +287,43 @@ pub fn unpack(data: &[u8], dest: &Path) -> Result<ArchiveMeta> {
 }
 
 /// Compute a stable hash over a directory tree: a recursive Merkle-like
-/// digest of (path, type, size, mtime, file-content-hash). Used to verify
-/// round-trips.
+/// digest of (path, type, size, file-content-hash / symlink-target). This
+/// mirrors [`hash_tree_entry`] exactly, so it matches the hash recorded at
+/// pack time. Sockets and fifos are skipped (a restored tree never contains
+/// them). Used to verify round-trips.
 fn tree_hash(root: &Path) -> Result<String> {
-    use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     tree_hash_into(root, root, &mut hasher)?;
     Ok(util::hex::encode_lower_owned(&hasher.finalize()))
 }
 
-fn tree_hash_into(root: &Path, current: &Path, hasher: &mut sha2::Sha256) -> Result<()> {
-    use sha2::Digest;
+fn tree_hash_into(root: &Path, current: &Path, hasher: &mut Sha256) -> Result<()> {
     let mut entries: Vec<std::fs::DirEntry> =
         std::fs::read_dir(current)?.collect::<std::result::Result<_, _>>()?;
     entries.sort_by_key(|e| e.file_name());
     for entry in entries {
         let path = entry.path();
-        let rel = path
-            .strip_prefix(root)
-            .unwrap_or(&path)
-            .display()
-            .to_string();
         let meta = std::fs::symlink_metadata(&path)?;
-        hasher.update(rel.as_bytes());
-        hasher.update([entry_type_byte(&meta)]);
-        hasher.update(meta.len().to_le_bytes());
-        if meta.is_file() {
+        if meta.is_dir() {
+            hash_tree_entry(hasher, root, &path, b'd', meta.len(), &[]);
+            tree_hash_into(root, &path, hasher)?;
+        } else if meta.is_file() {
             let h = util::sha256_file(&path)?;
-            hasher.update(h.as_bytes());
+            hash_tree_entry(hasher, root, &path, b'f', meta.len(), h.as_bytes());
         } else if meta.is_symlink() {
             let t = std::fs::read_link(&path)?;
-            hasher.update(t.to_string_lossy().as_bytes());
-        } else if meta.is_dir() {
-            tree_hash_into(root, &path, hasher)?;
+            hash_tree_entry(
+                hasher,
+                root,
+                &path,
+                b'l',
+                meta.len(),
+                t.to_string_lossy().as_bytes(),
+            );
         }
+        // Sockets, fifos: skipped (not representable in the tar).
     }
     Ok(())
-}
-
-fn entry_type_byte(meta: &std::fs::Metadata) -> u8 {
-    if meta.is_symlink() {
-        b'l'
-    } else if meta.is_dir() {
-        b'd'
-    } else if meta.is_file() {
-        b'f'
-    } else {
-        b'?'
-    }
 }
 
 /// Verify that a directory tree matches the recorded metadata (used after
@@ -351,5 +436,35 @@ mod tests {
         unpack(&buf, dest.path()).unwrap();
         fs::write(dest.path().join("f"), b"tampered").unwrap();
         assert!(verify(dest.path(), &meta).is_err());
+    }
+
+    /// A tree containing a Unix-domain socket (which the tar format cannot
+    /// carry) must still round-trip and verify: the socket is skipped by
+    /// both the pack hash and the tar, so the recorded hash matches the
+    /// restored tree. This is exactly the class of file a running Termius
+    /// leaves in its data dir (`app.*` single-instance sockets), and it is
+    /// the bug behind "restored tree hash mismatch" on a live dir.
+    #[cfg(unix)]
+    #[test]
+    fn socket_in_tree_still_round_trips_and_verifies() {
+        use std::os::unix::net::UnixListener;
+        let src = tempfile::tempdir().unwrap();
+        fs::write(src.path().join("f.txt"), b"content").unwrap();
+        fs::create_dir_all(src.path().join("sub")).unwrap();
+        fs::write(src.path().join("sub/inner.txt"), b"inner").unwrap();
+        let _sock = UnixListener::bind(src.path().join("sock")).unwrap();
+
+        let mut buf = Vec::new();
+        let meta = pack(src.path(), &mut buf, "t").unwrap();
+        // The socket is not an archived entry.
+        assert_eq!(meta.entry_count, 3);
+        assert_eq!(meta.byte_size, 12);
+
+        let dest = tempfile::tempdir().unwrap();
+        let got = unpack(&buf, dest.path()).unwrap();
+        assert_eq!(got.sha256_root, meta.sha256_root);
+        verify(dest.path(), &got).unwrap();
+        // The socket was not (and cannot be) restored.
+        assert!(!dest.path().join("sock").exists());
     }
 }

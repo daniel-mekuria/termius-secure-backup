@@ -18,6 +18,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no longer exists falls back to the normal auto-detection.
 
 ### Fixed
+- Restoring a backup made while Termius was running failed with "restored
+  tree hash mismatch": `pack` walked the directory twice (once to hash,
+  once to build the archive) and hashed Unix-domain sockets and fifos that
+  the tar silently drops — Termius's data directory holds `app.*`
+  single-instance sockets, so the recorded hash could never match the
+  restored tree. The directory is now walked exactly once: each entry is
+  appended to the tar and fed into the integrity hash in the same pass,
+  and each file's content is read exactly once into both. The hash format
+  for files / dirs / symlinks is unchanged, so older backups made from a
+  quiet tree still verify — but ones made from a live Termius directory
+  (where the old code's two separate walks could diverge, and its sockets
+  / fifos were hashed but never packed) need a fresh backup.
 - `gdrive restore` reported "no backup vaults found" even when the vault
   (and its `.tsbak-vault` marker) was on Drive: the vault-search query
   filtered on `mimeType` but never asked for that field in the API's
