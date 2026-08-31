@@ -17,6 +17,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--termius-dir` always overrides the saved path, and a saved path that
   no longer exists falls back to the normal auto-detection.
 
+### Changed
+- Restore no longer asks "The password is weak: … Use it anyway?" — the
+  password is already baked into the backup, so there was nothing to
+  confirm. Restore now prints the one-line warning (as it already did for
+  file / env-var passwords) and proceeds; the full gate still applies when
+  creating a backup, where a stronger password can still be chosen.
+
 ### Fixed
 - Restoring a backup made while Termius was running failed with "restored
   tree hash mismatch": `pack` walked the directory twice (once to hash,

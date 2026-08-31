@@ -92,11 +92,14 @@ pub fn run(opts: Options<'_>) -> Result<PathBuf> {
 /// one is tried only once — retrying it cannot succeed. An interactive
 /// session on a TTY gets [`prompt::MAX_PASSWORD_ATTEMPTS`] attempts;
 /// non-interactive prompt reads (pipes) also fail fast.
+///
+/// This is the *restore* path: the password is already baked into the
+/// backup, so a weak one only warns — there is no stronger one to choose
+/// instead. Backup uses [`acquire_password`] directly (full gate).
 pub fn acquire_and_decrypt<T>(
     file: Option<&Path>,
     env: Option<&str>,
     confirm_reentry: bool,
-    skip_weak_gate: bool,
     mut decrypt: impl FnMut(&str) -> Result<T>,
 ) -> Result<T> {
     let interactive = std::io::stdin().is_terminal();
@@ -106,7 +109,7 @@ pub fn acquire_and_decrypt<T>(
         prompt::MAX_PASSWORD_ATTEMPTS
     };
     prompt::with_password_retry(
-        || acquire_password(file, env, confirm_reentry, skip_weak_gate),
+        || acquire_password(file, env, confirm_reentry, /*skip_weak_gate*/ true),
         &mut decrypt,
         max_attempts,
     )
@@ -160,17 +163,11 @@ mod tests {
         let pw_file = dir.path().join("pw.txt");
         std::fs::write(&pw_file, "some-backup-pw\n").unwrap();
         let mut attempts = 0;
-        let out: Result<()> = acquire_and_decrypt(
-            Some(&pw_file),
-            None,
-            false,
-            /*skip_weak_gate*/ true,
-            |pw| {
-                attempts += 1;
-                assert_eq!(pw, "some-backup-pw");
-                Err(Error::PasswordRejected)
-            },
-        );
+        let out: Result<()> = acquire_and_decrypt(Some(&pw_file), None, false, |pw| {
+            attempts += 1;
+            assert_eq!(pw, "some-backup-pw");
+            Err(Error::PasswordRejected)
+        });
         // A file source is deterministic — one attempt, even on a TTY.
         assert!(matches!(out, Err(Error::PasswordRejected)));
         assert_eq!(attempts, 1);

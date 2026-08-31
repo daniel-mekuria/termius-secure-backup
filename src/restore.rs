@@ -83,7 +83,6 @@ pub fn run(opts: Options<'_>) -> Result<PathBuf> {
         opts.password_file,
         opts.password_env,
         /*confirm_reentry*/ false,
-        opts.yes,
         |pw| container::read_and_decrypt(opts.backup_file, pw.as_bytes()),
     )
     .map_err(|e| {
