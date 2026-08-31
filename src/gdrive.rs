@@ -1394,6 +1394,20 @@ mod tests {
     }
 
     #[test]
+    fn creds_save_creates_missing_parent_dirs() {
+        // First `gdrive login` on a fresh machine: the config subdirectory
+        // does not exist yet — saving must not fail with
+        // "No such file or directory" (the user's original os-error-2 bug).
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("deep/nested/gdrive-creds.tsb");
+        assert!(!path.parent().unwrap().exists());
+        let c = creds("a@b.com");
+        save_creds_fast(&path, b"master-pw-123", &c).unwrap();
+        let got = load_creds_fast(&path, b"master-pw-123").unwrap();
+        assert_eq!(got, c);
+    }
+
+    #[test]
     fn token_expired_flag() {
         let mut c = creds("a@b.com");
         c.expires_at = util::current_time().unix_timestamp() + 3600;

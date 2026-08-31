@@ -52,6 +52,8 @@ pub struct Header {
 
 /// Write an encrypted container to `dest`. `plaintext` is the already-
 /// compressed+archived payload; `aad` is captured from the header bytes.
+/// Parent directories of `dest` are created as needed (e.g. a fresh
+/// `~/.config/termius-secure-backup/` on first `gdrive login`).
 pub fn write(dest: &Path, password: &[u8], params: &KdfParams, plaintext: &[u8]) -> Result<()> {
     params.validate()?;
     let salt = random_salt();
@@ -61,23 +63,67 @@ pub fn write(dest: &Path, password: &[u8], params: &KdfParams, plaintext: &[u8])
     let key = SecretKey::new(derive_key(password, &salt, params)?);
     let ciphertext = seal(&key, &nonce, plaintext, &header)?;
 
-    let mut file = std::fs::File::create(dest)?;
-    file.write_all(&header)?;
-    file.write_all(&ciphertext)?;
-    file.sync_all()?;
+    if let Some(parent) = dest.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                Error::Io(std::io::Error::new(
+                    e.kind(),
+                    format!("creating the directory for {}: {e}", dest.display()),
+                ))
+            })?;
+        }
+    }
+    let mut file = std::fs::File::create(dest).map_err(|e| {
+        Error::Io(std::io::Error::new(
+            e.kind(),
+            format!("writing {}: {e}", dest.display()),
+        ))
+    })?;
+    file.write_all(&header).map_err(|e| {
+        Error::Io(std::io::Error::new(
+            e.kind(),
+            format!("writing {}: {e}", dest.display()),
+        ))
+    })?;
+    file.write_all(&ciphertext).map_err(|e| {
+        Error::Io(std::io::Error::new(
+            e.kind(),
+            format!("writing {}: {e}", dest.display()),
+        ))
+    })?;
+    file.sync_all().map_err(|e| {
+        Error::Io(std::io::Error::new(
+            e.kind(),
+            format!("writing {}: {e}", dest.display()),
+        ))
+    })?;
     Ok(())
+}
+
+/// Read a `.tsb` file, naming it in any "not found" error.
+fn read_backup_file(path: &Path) -> Result<Vec<u8>> {
+    std::fs::read(path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            Error::NotFound(format!("backup file not found: {}", path.display()))
+        } else {
+            Error::Io(std::io::Error::new(
+                e.kind(),
+                format!("reading {}: {e}", path.display()),
+            ))
+        }
+    })
 }
 
 /// Read and parse only the cleartext header. No password required.
 pub fn read_header(path: &Path) -> Result<Header> {
-    let raw = std::fs::read(path)?;
+    let raw = read_backup_file(path)?;
     parse_header(&raw)
 }
 
 /// Read the full container and decrypt it with `password`. Returns the
 /// plaintext payload (compressed archive).
 pub fn read_and_decrypt(path: &Path, password: &[u8]) -> Result<Vec<u8>> {
-    let raw = std::fs::read(path)?;
+    let raw = read_backup_file(path)?;
     let header_len = HEADER_LEN;
     if raw.len() < header_len {
         return Err(Error::BadFormat {
