@@ -164,6 +164,20 @@ pub fn resolve_gdrive_creds_path(override_path: Option<&Path>) -> Result<PathBuf
     })
 }
 
+/// The sync state file: for each vault, the fingerprint of the tree that
+/// the most recent `gdrive backup` / `gdrive sync` uploaded. Plain JSON, no
+/// sensitive content (counts, sizes, an mtime — no file names). Lives next
+/// to the credential store:
+/// `~/.config/termius-secure-backup/sync-state.json` (Linux),
+/// `~/Library/Application Support/termius-secure-backup/sync-state.json`
+/// (macOS), `%APPDATA%\termius-secure-backup\sync-state.json` (Windows).
+pub fn sync_state_path() -> Result<PathBuf> {
+    let base = dirs::config_dir().ok_or_else(|| {
+        Error::NotFound("could not determine the user config directory for this OS".to_string())
+    })?;
+    Ok(base.join("termius-secure-backup").join("sync-state.json"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

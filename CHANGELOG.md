@@ -19,6 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   changed, and exits — cron / systemd-timer friendly (README has a full
   timer example). Transient network failures (and a Google token that
   expires mid-run) are retried on the next tick; Ctrl-C stops the watcher.
+  Every upload (and every `gdrive backup`) records the fingerprint of the
+  tree it saved in `~/.config/termius-secure-backup/sync-state.json`, and
+  `--once` compares against that record rather than the current tree — so
+  scheduled runs upload exactly when Termius changed since the last run,
+  and baselines survive reboots (the first run uploads the current tree).
 - Post-backup sync offer: after a successful `gdrive backup` (wizard or
   direct), the tool asks whether to start the continuous sync; the
   backup just made becomes the baseline so it is not re-uploaded.

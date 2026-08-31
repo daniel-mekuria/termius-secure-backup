@@ -21,10 +21,13 @@
 //! `--once` skips the debounce entirely (check once, upload if changed, exit)
 //! so the command is cron / systemd-timer friendly.
 
+use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::path::Path;
 use std::thread;
 use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
 
 use crate::archive;
 use crate::backup;
@@ -39,7 +42,7 @@ use crate::util;
 /// size, or mtime changes the signature. (Pure renames of same-size,
 /// same-mtime files are not detected — the next content change re-captures
 /// them, which is fine for a backup tool.)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct DirSignature {
     pub file_count: u64,
     pub total_size: u64,
@@ -72,6 +75,61 @@ fn walk_signature(current: &Path, sig: &mut DirSignature) -> Result<()> {
         sig.max_mtime_secs = sig.max_mtime_secs.max(mtime);
     }
     Ok(())
+}
+
+/// On-disk sync state: for each vault, the fingerprint of the tree that
+/// the most recent backup/sync uploaded. This is what lets a fresh `--once`
+/// run (cron, or after a reboot) know what is already on Drive without
+/// downloading anything, and what lets a `gdrive sync` started after a
+/// reboot pick up changes made while the machine was off.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct SyncStateFile {
+    #[serde(default)]
+    vaults: HashMap<String, DirSignature>,
+}
+
+fn load_state_file(path: &Path) -> SyncStateFile {
+    match std::fs::read_to_string(path) {
+        Ok(s) => serde_json::from_str(&s).unwrap_or_else(|e| {
+            eprintln!(
+                "warning: sync state {} is unreadable ({e}) — treating it as empty.",
+                path.display()
+            );
+            SyncStateFile::default()
+        }),
+        // Missing file = first run on this machine.
+        Err(_) => SyncStateFile::default(),
+    }
+}
+
+fn record_state_file(path: &Path, vault: &str, sig: DirSignature) {
+    let mut file = load_state_file(path);
+    file.vaults.insert(vault.to_string(), sig);
+    let json =
+        serde_json::to_vec_pretty(&file).expect("SyncStateFile is serializable by construction");
+    if let Err(e) = util::atomic_write(path, &json) {
+        eprintln!(
+            "warning: could not write sync state {}: {e}",
+            path.display()
+        );
+    }
+}
+
+/// The per-vault uploaded-fingerprint record from the default state file.
+fn load_sync_state() -> SyncStateFile {
+    match paths::sync_state_path() {
+        Ok(p) => load_state_file(&p),
+        Err(_) => SyncStateFile::default(),
+    }
+}
+
+/// Record `sig` as the last uploaded fingerprint for `vault`. Best-effort:
+/// a state-write failure never fails an otherwise-successful backup (worst
+/// case, the next sync re-uploads the same state once).
+pub fn record_sync_state(vault: &str, sig: DirSignature) {
+    if let Ok(p) = paths::sync_state_path() {
+        record_state_file(&p, vault, sig);
+    }
 }
 
 /// Scheduling parameters for the sync loop.
@@ -220,9 +278,11 @@ pub struct SyncOptions<'a> {
     /// Check once, upload if changed, then exit.
     pub once: bool,
     /// Baseline signature: changes are detected relative to this. `None`
-    /// takes the current tree state as the baseline (no upload until the
-    /// tree changes). Set by the post-backup offer so a fresh backup is not
-    /// re-uploaded a few seconds later.
+    /// falls back to the fingerprint recorded in the on-disk sync state
+    /// (the last upload for this vault), or to empty on a first run — so
+    /// `--once` compares against what is really on Drive, across reboots.
+    /// Set by the post-backup offer so a fresh backup is not re-uploaded a
+    /// few seconds later.
     pub last_sig: Option<DirSignature>,
     /// KDF parameters for the encrypted uploads (the CLI passes the
     /// production defaults; tests use fast ones).
@@ -255,18 +315,34 @@ pub fn run_sync(opts: SyncOptions<'_>) -> Result<()> {
     let password = backup::acquire_password(opts.password_file, opts.password_env, true, opts.yes)?;
 
     let folder_id = session.ensure_vault(&name)?;
+    // Baseline: the post-backup offer seeds it explicitly (so a fresh
+    // backup is not re-uploaded); otherwise the last uploaded fingerprint
+    // recorded on this machine; on a first run (no record) the baseline is
+    // empty, so the current tree is uploaded on the first check.
     let baseline = match opts.last_sig {
         Some(sig) => sig,
-        None => dir_signature(&src)?,
+        None => load_sync_state()
+            .vaults
+            .get(&name)
+            .copied()
+            .unwrap_or_default(),
     };
     let mut state = SyncState::with_baseline(baseline);
 
-    eprintln!(
-        "Continuous sync: watching {} → vault '{}' every {}s (Ctrl-C to stop).",
-        src.display(),
-        vault_name,
-        policy.interval.as_secs()
-    );
+    if opts.once {
+        eprintln!(
+            "One-shot sync: checking {} against vault '{}' …",
+            src.display(),
+            vault_name
+        );
+    } else {
+        eprintln!(
+            "Continuous sync: watching {} → vault '{}' every {}s (Ctrl-C to stop).",
+            src.display(),
+            vault_name,
+            policy.interval.as_secs()
+        );
+    }
     if opts.keep > 0 {
         eprintln!("Keeping the newest {} backup(s) in the vault.", opts.keep);
     }
@@ -308,7 +384,8 @@ pub fn run_sync(opts: SyncOptions<'_>) -> Result<()> {
                 vault_name: &vault_name,
             };
             match attempt_upload(&mut session, &ctx, &mut state, sig) {
-                Ok(()) => {}
+                Ok(true) => record_sync_state(&name, sig),
+                Ok(false) => {} // torn-write skip — the next tick retries
                 Err(e) if opts.once => return Err(e),
                 Err(e) => eprintln!("warning: upload failed: {e} — retrying next tick."),
             }
@@ -320,7 +397,11 @@ pub fn run_sync(opts: SyncOptions<'_>) -> Result<()> {
         thread::sleep(policy.interval);
     }
 
-    eprintln!("Sync stopped.");
+    if opts.once {
+        eprintln!("One-shot sync complete.");
+    } else {
+        eprintln!("Sync stopped.");
+    }
     Ok(())
 }
 
@@ -338,14 +419,15 @@ struct UploadCtx<'a> {
 /// One upload attempt: pack, torn-write re-check, encrypt, upload, prune,
 /// and record the new baseline. A transient auth error (401) triggers a
 /// token refresh and a single retry — the token may have expired mid-run.
+/// Returns true when an upload actually happened (false = torn-write skip).
 fn attempt_upload(
     session: &mut gdrive::Session,
     ctx: &UploadCtx<'_>,
     state: &mut SyncState,
     sig: DirSignature,
-) -> Result<()> {
+) -> Result<bool> {
     match do_upload(session, ctx, state, sig, util::current_time()) {
-        Ok(()) => Ok(()),
+        Ok(done) => Ok(done),
         Err(e) if is_auth_error(&e) => {
             eprintln!("Google token appears expired — refreshing and retrying once.");
             session.refresh_if_expired(ctx.opts.creds_path, ctx.master.as_bytes())?;
@@ -357,14 +439,15 @@ fn attempt_upload(
 
 /// Perform one backup upload for the sync loop. On success the state's
 /// baseline is advanced to `sig` (so the next tick sees a clean tree) and
-/// retention pruning is applied.
+/// retention pruning is applied. Returns false (without error) when the
+/// torn-write guard skips the window.
 fn do_upload(
     session: &mut gdrive::Session,
     ctx: &UploadCtx<'_>,
     state: &mut SyncState,
     sig: DirSignature,
     now: time::OffsetDateTime,
-) -> Result<()> {
+) -> Result<bool> {
     let opts = ctx.opts;
     eprintln!("Changes detected — packing {} …", ctx.src.display());
     let mut payload = Vec::new();
@@ -377,7 +460,7 @@ fn do_upload(
     if after != sig {
         eprintln!("Directory changed while packing — skipping this window.");
         zeroize(&mut payload);
-        return Ok(());
+        return Ok(false);
     }
 
     eprintln!(
@@ -401,7 +484,7 @@ fn do_upload(
         "Synced {file_name} to vault '{}' (Drive file id {file_id}).",
         ctx.vault_name
     );
-    Ok(())
+    Ok(true)
 }
 
 /// A Drive error that looks like an expired/invalid access token.
@@ -668,6 +751,42 @@ mod tests {
     }
 
     #[test]
+    fn sync_state_file_round_trip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("sync-state.json");
+        let a = sig(1, 10, 100);
+        let b = sig(2, 20, 200);
+        record_state_file(&path, "laptop", a);
+        record_state_file(&path, "server", b);
+        let file = load_state_file(&path);
+        assert_eq!(file.vaults.get("laptop"), Some(&a));
+        assert_eq!(file.vaults.get("server"), Some(&b));
+
+        // Updating an existing vault replaces its entry, keeps the others.
+        let a2 = sig(1, 11, 101);
+        record_state_file(&path, "laptop", a2);
+        let file = load_state_file(&path);
+        assert_eq!(file.vaults.get("laptop"), Some(&a2));
+        assert_eq!(file.vaults.get("server"), Some(&b));
+    }
+
+    #[test]
+    fn sync_state_file_missing_is_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = load_state_file(&tmp.path().join("absent.json"));
+        assert!(file.vaults.is_empty());
+    }
+
+    #[test]
+    fn sync_state_file_corrupt_is_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("sync-state.json");
+        std::fs::write(&path, b"not json").unwrap();
+        let file = load_state_file(&path);
+        assert!(file.vaults.is_empty());
+    }
+
+    #[test]
     fn do_upload_into_mock_session_produces_valid_tsb() {
         let src = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(src.path().join("sub")).unwrap();
@@ -714,7 +833,7 @@ mod tests {
             folder_id: &folder_id,
             vault_name: "vault.tsbak-vault",
         };
-        do_upload(&mut session, &ctx, &mut state, sig, at(0)).unwrap();
+        assert!(do_upload(&mut session, &ctx, &mut state, sig, at(0)).unwrap());
 
         // Baseline advanced to the uploaded signature.
         assert_eq!(state.uploaded_sig, sig);
@@ -792,7 +911,7 @@ mod tests {
             folder_id: &folder_id,
             vault_name: "vault.tsbak-vault",
         };
-        do_upload(&mut session, &ctx, &mut state, sig, at(0)).unwrap();
+        assert!(do_upload(&mut session, &ctx, &mut state, sig, at(0)).unwrap());
 
         // 3 seeded + 1 new = 4; keep 2 → 2 deleted, 2 newest remain.
         let remaining = session.list_backups(&folder_id).unwrap();

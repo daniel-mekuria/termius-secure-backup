@@ -213,6 +213,19 @@ termius-backup gdrive sync --name laptop --once
   if the fingerprint still moves during packing, that window is skipped and
   re-checked on the next tick. A tree that never settles (Termius is always
   writing something) is force-uploaded every 15 minutes anyway.
+- **Baselines survive reboots**: every upload — and every `gdrive backup` —
+  records the fingerprint of the tree it just saved in
+  `~/.config/termius-secure-backup/sync-state.json` (plain JSON, counts and
+  sizes only, no file names). `--once` runs compare the current tree against
+  *that record*, not against themselves, so a scheduled run uploads exactly
+  when Termius has changed since the last run — even across reboots. The very
+  first run (no record yet) uploads the current tree.
+- **The watcher itself is a foreground process**: `gdrive sync` without
+  `--once` stops when you Ctrl-C it or the machine reboots. For a
+  reboot-proof sync, run it `--once` from a systemd timer (below) —
+  `Persistent=true` makes the timer fire the missed run right after a
+  reboot. (A systemd service with `Restart=always` around the long-running
+  watcher also works, if you prefer.)
 - **Retention**: `--keep N` (default 10) trims the vault to the newest N
   backups after each upload; `--keep 0` keeps everything. `gdrive backup
   --keep N` applies the same retention once per run.

@@ -1337,6 +1337,12 @@ pub fn run_backup(opts: BackupOptions<'_>) -> Result<(String, String)> {
     let folder_id = session.ensure_vault(&name)?;
     let file_id = session.upload_file(&folder_id, &file_name, &tsb)?;
 
+    // Keep the sync baseline fresh: a later `gdrive sync` (or a cron
+    // `--once` run) should not re-upload the state this backup just saved.
+    if let Ok(sig) = crate::sync::dir_signature(&src) {
+        crate::sync::record_sync_state(&name, sig);
+    }
+
     // Optional retention: trim older backups down to the newest `keep`.
     if opts.keep > 0 {
         let n = prune_vault(&mut session, &folder_id, opts.keep)?;
