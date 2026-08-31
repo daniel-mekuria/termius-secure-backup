@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-08-31
+
 ### Added
 - `gdrive sync` now remembers the Termius data directory it watches: a
   path given with `--termius-dir` (or entered at the interactive
