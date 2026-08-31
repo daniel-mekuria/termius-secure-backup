@@ -90,10 +90,28 @@ struct SyncStateFile {
     /// `gdrive sync off`; [`SYNC_OFF_ALL`] means "all vaults".
     #[serde(default)]
     sync_off: Vec<String>,
+    /// Vault names explicitly turned back on while a global
+    /// [`SYNC_OFF_ALL`] off is in effect — they are on even though
+    /// everything else is off. "Turn back on for one vault" carves a
+    /// vault out of an all-vaults off this way.
+    #[serde(default)]
+    sync_on: Vec<String>,
 }
 
 /// Sentinel stored in `sync_off` for a global (all-vaults) off.
 const SYNC_OFF_ALL: &str = "*";
+
+impl SyncStateFile {
+    /// Whether the continuous-sync offer is off for `vault`: either it was
+    /// turned off individually, or a global off is set and `vault` has no
+    /// per-vault exception.
+    fn is_off(&self, vault: &str) -> bool {
+        let individual = self.sync_off.iter().any(|x| x == vault);
+        let global = self.sync_off.iter().any(|x| x == SYNC_OFF_ALL)
+            && !self.sync_on.iter().any(|x| x == vault);
+        individual || global
+    }
+}
 
 fn load_state_file(path: &Path) -> SyncStateFile {
     match std::fs::read_to_string(path) {
@@ -139,18 +157,34 @@ fn toggle_sync_off(path: &Path, vault: Option<&str>, off: bool) -> Result<Vec<St
                 if !file.sync_off.iter().any(|x| x == v) {
                     file.sync_off.push(v.to_string());
                 }
+                // An explicit off overrides any per-vault exception.
+                file.sync_on.retain(|x| x != v);
                 file.vaults.remove(v);
             }
             None => {
                 if !file.sync_off.iter().any(|x| x == SYNC_OFF_ALL) {
                     file.sync_off.push(SYNC_OFF_ALL.to_string());
                 }
+                // Exceptions are meaningless when everything is off.
+                file.sync_on.clear();
             }
         }
     } else {
         match vault {
-            Some(v) => file.sync_off.retain(|x| x != v),
-            None => file.sync_off.clear(),
+            Some(v) => {
+                file.sync_off.retain(|x| x != v);
+                // With a global off in effect, record this vault as an
+                // exception so it is actually on.
+                if file.sync_off.iter().any(|x| x == SYNC_OFF_ALL)
+                    && !file.sync_on.iter().any(|x| x == v)
+                {
+                    file.sync_on.push(v.to_string());
+                }
+            }
+            None => {
+                file.sync_off.clear();
+                file.sync_on.clear();
+            }
         }
     }
     save_state_file(path, &file)?;
@@ -175,14 +209,42 @@ pub fn record_sync_state(vault: &str, sig: DirSignature) {
 }
 
 /// Whether the continuous-sync offer is turned off for `vault` (either
-/// globally, or for that vault specifically).
+/// globally without an exception, or for that vault specifically).
 pub fn sync_is_off(vault: &str) -> bool {
+    match paths::sync_state_path() {
+        Ok(p) => load_state_file(&p).is_off(vault),
+        Err(_) => false,
+    }
+}
+
+/// Whether the global (all-vaults) off marker is currently set.
+pub fn sync_globally_off() -> bool {
     match paths::sync_state_path() {
         Ok(p) => load_state_file(&p)
             .sync_off
             .iter()
-            .any(|x| x == SYNC_OFF_ALL || x == vault),
+            .any(|x| x == SYNC_OFF_ALL),
         Err(_) => false,
+    }
+}
+
+/// Human-readable summary of the offer's on/off state, for the
+/// interactive "Sync settings" page.
+pub fn sync_status() -> String {
+    let file = match paths::sync_state_path() {
+        Ok(p) => load_state_file(&p),
+        Err(_) => return "on for all vaults".to_string(),
+    };
+    if file.sync_off.iter().any(|x| x == SYNC_OFF_ALL) {
+        if file.sync_on.is_empty() {
+            "off for all vaults".to_string()
+        } else {
+            format!("off for all vaults except: {}", file.sync_on.join(", "))
+        }
+    } else if file.sync_off.is_empty() {
+        "on for all vaults".to_string()
+    } else {
+        format!("off for: {}", file.sync_off.join(", "))
     }
 }
 
@@ -565,10 +627,13 @@ fn zeroize(buf: &mut [u8]) {
 }
 
 /// After a successful `gdrive backup`, offer to keep the vault up to date
-/// automatically. No-ops when `--yes` was passed, stdin is not a TTY
-/// (CI / pipes), or the offer was turned off with `gdrive sync off`; and
-/// it swallows sync errors with a message — the backup itself already
-/// succeeded, and a declined or failed sync should not fail the run.
+/// automatically. The offer is an interactive three-way choice: start
+/// syncing now, decline, or decline *and stop being asked about this
+/// vault* (which records a `gdrive sync off` for it). No-ops when `--yes`
+/// was passed, stdin is not a TTY (CI / pipes), or the offer was turned
+/// off with `gdrive sync off`; and it swallows sync errors with a message
+/// — the backup itself already succeeded, and a declined or failed sync
+/// should not fail the run.
 pub fn offer_after_backup(
     termius_dir: Option<&Path>,
     password_file: Option<&Path>,
@@ -585,13 +650,30 @@ pub fn offer_after_backup(
     if sync_is_off(base) {
         return;
     }
-    let accepted = match prompt::confirm(&format!(
-        "Back up to Google Drive continuously while Termius changes? (vault '{base}')"
-    )) {
-        Ok(b) => b,
+    // A bare Enter keeps the old behavior (decline, ask again next time).
+    let choice = match prompt::choose(
+        &format!("Back up to Google Drive continuously while Termius changes? (vault '{base}')"),
+        &[
+            "Yes — start continuous sync now".to_string(),
+            format!("No — and don't ask me again for '{base}'"),
+            "No — ask me again next time".to_string(),
+        ],
+        2,
+    ) {
+        Ok(c) => c,
         Err(_) => return, // e.g. Ctrl-C at the prompt — the backup is done
     };
-    if !accepted {
+    if choice == 1 {
+        match sync_off(Some(base)) {
+            Ok(_) => eprintln!(
+                "OK — I won't ask about vault '{base}' again \
+                 ('gdrive sync on' turns it back on)."
+            ),
+            Err(e) => eprintln!("could not remember that choice: {e}"),
+        }
+        return;
+    }
+    if choice != 0 {
         return;
     }
 
@@ -888,17 +970,38 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("sync-state.json");
 
-        // Global off.
+        // Global off: every vault is off.
         let off = toggle_sync_off(&path, None, true).unwrap();
         assert_eq!(off, vec![SYNC_OFF_ALL.to_string()]);
+        let file = load_state_file(&path);
+        assert!(file.is_off("laptop"));
+        assert!(file.is_off("server"));
 
-        // Turning one vault back on does not clear the global off.
+        // Turning one vault back on does not clear the global off — it
+        // records the vault as an exception, so that vault is on while
+        // everything else stays off.
         let off = toggle_sync_off(&path, Some("laptop"), false).unwrap();
         assert_eq!(off, vec![SYNC_OFF_ALL.to_string()]);
+        let file = load_state_file(&path);
+        assert!(!file.is_off("laptop"), "exception vault must be on");
+        assert!(file.is_off("server"), "other vaults must stay off");
+        assert!(file.sync_on.iter().any(|x| x == "laptop"));
 
-        // Global on clears everything.
+        // Explicitly turning the exception off again removes it and adds
+        // the individual marker.
+        let off = toggle_sync_off(&path, Some("laptop"), true).unwrap();
+        assert!(off.iter().any(|x| x == SYNC_OFF_ALL));
+        let file = load_state_file(&path);
+        assert!(file.is_off("laptop"));
+        assert!(!file.sync_on.iter().any(|x| x == "laptop"));
+
+        // Global on clears everything, exceptions included.
         let off = toggle_sync_off(&path, None, false).unwrap();
         assert!(off.is_empty());
+        let file = load_state_file(&path);
+        assert!(!file.is_off("laptop"));
+        assert!(!file.is_off("server"));
+        assert!(file.sync_on.is_empty());
     }
 
     #[test]

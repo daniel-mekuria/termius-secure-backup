@@ -2,10 +2,12 @@
 
 //! Interactive wizard shown when `termius-backup` is run with no subcommand.
 //!
-//! Page 1 selects the action (backup / restore); page 2 selects the backend
-//! (local file / Google Drive). The Google Drive branch runs the login flow
-//! when no credentials are stored yet, and simply asks for the master
-//! password when already logged in (both handled by the session open).
+//! Page 1 selects the action (backup / restore / sync settings); page 2
+//! selects the backend (local file / Google Drive). The Google Drive branch
+//! runs the login flow when no credentials are stored yet, and simply asks
+//! for the master password when already logged in (both handled by the
+//! session open). "Sync settings" toggles the post-backup continuous-sync
+//! offer — per vault or for all vaults — without needing a login.
 
 use std::io::IsTerminal;
 use std::path::Path;
@@ -35,8 +37,17 @@ pub fn run(g: &Flags) -> Result<()> {
     // Page 1: action.
     let action = prompt::choose(
         "What would you like to do?",
-        &["Backup".to_string(), "Restore".to_string()],
+        &[
+            "Backup".to_string(),
+            "Restore".to_string(),
+            "Sync settings".to_string(),
+        ],
+        0,
     )?;
+
+    if action == 2 {
+        return sync_settings();
+    }
 
     // Page 2: backend.
     let backend = prompt::choose(
@@ -45,6 +56,7 @@ pub fn run(g: &Flags) -> Result<()> {
             _ => "Restore from where?",
         },
         &["Local file".to_string(), "Google Drive".to_string()],
+        0,
     )?;
 
     match (action, backend) {
@@ -54,6 +66,51 @@ pub fn run(g: &Flags) -> Result<()> {
         (1, 1) => restore_gdrive(g),
         _ => unreachable!("prompt::choose returns a valid index"),
     }
+}
+
+/// Interactive toggle for the continuous-sync offer: shows the current
+/// state and lets the user turn it off or back on, per vault or for all
+/// vaults. Pure local state — no login or Termius directory needed.
+fn sync_settings() -> Result<()> {
+    let state = sync::sync_status();
+    eprintln!("The post-backup continuous-sync offer is currently {state}.");
+
+    let choice = prompt::choose(
+        "What would you like to change?",
+        &[
+            "Turn it off for all vaults".to_string(),
+            "Turn it off for one vault".to_string(),
+            "Turn it back on for all vaults".to_string(),
+            "Turn it back on for one vault".to_string(),
+        ],
+        0,
+    )?;
+    match choice {
+        0 => {
+            sync::sync_off(None)?;
+        }
+        1 => {
+            let name = prompt::ask_string("Vault name:", None)?;
+            sync::sync_off(Some(&name))?;
+        }
+        2 => {
+            sync::sync_on(None)?;
+        }
+        _ => {
+            let name = prompt::ask_string("Vault name:", None)?;
+            let remaining = sync::sync_on(Some(&name))?;
+            if remaining.iter().any(|x| x == "*") {
+                eprintln!(
+                    "Vault '{name}' is now on; all other vaults remain off \
+                     ('off for all vaults' is still set)."
+                );
+            } else {
+                eprintln!("Vault '{name}' is now on.");
+            }
+        }
+    }
+    eprintln!("Done.");
+    Ok(())
 }
 
 /// Local backup: prompts for the destination file, then password.

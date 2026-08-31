@@ -70,12 +70,13 @@ and put it on your `PATH`.
 ### Interactive mode (no subcommand)
 
 Run `termius-backup` with **no arguments** on a terminal and it walks you
-through a two-page menu:
+through a menu:
 
 ```
 What would you like to do?
   [1] Backup
   [2] Restore
+  [3] Sync settings
 Back up to where?
   [1] Local file
   [2] Google Drive
@@ -86,6 +87,10 @@ Back up to where?
 - **Google Drive** → runs the login flow if you are not logged in yet; if you
   are, it asks for your master password, then continues (vault name + backup
   password for backup, vault/backup selection for restore).
+- **Sync settings** → shows the current state of the post-backup
+  continuous-sync offer and lets you turn it off or back on, for one vault
+  or for all — the interactive version of `gdrive sync off` / `gdrive sync
+  on`. No login is needed; it only touches local state.
 
 All global flags (`--termius-dir`, `--password-file`, …) still apply. In a
 non-interactive session (no TTY) a bare invocation is a usage error — pass a
@@ -193,10 +198,16 @@ Uploaded backups are identical `.tsb` files, so `info`, local `restore`, and
 `gdrive sync` keeps a vault up to date automatically: it watches the Termius
 data directory and uploads a fresh encrypted `.tsb` whenever it changes.
 
-After a successful `gdrive backup` the tool also asks *"Back up to Google
-Drive continuously while Termius changes?"* — answering yes starts the same
-watcher (the backup you just made becomes the baseline, so nothing is
-re-uploaded a moment later).
+After a successful `gdrive backup` the tool also offers continuous sync,
+with a three-way choice:
+
+- **Yes — start continuous sync now** starts the same watcher (the backup
+  you just made becomes the baseline, so nothing is re-uploaded a moment
+  later).
+- **No — and don't ask me again for '<vault>'** turns the offer off for
+  that vault, so it will not be asked again (see *Turning sync off* below).
+- **No — ask me again next time** declines once; the question is asked
+  again after the next backup. A bare Enter keeps this behavior.
 
 ```sh
 # Watch the directory and re-backup as Termius changes (Ctrl-C to stop):
@@ -264,10 +275,19 @@ stops when its timer stops — but the tool also remembers whether it should
 turn it off:
 
 ```sh
-termius-backup gdrive sync off                 # all vaults
-termius-backup gdrive sync off --name laptop   # just one vault
-termius-backup gdrive sync on                  # turn it back on
+termius-backup gdrive sync off                  # all vaults
+termius-backup gdrive sync off --name laptop    # just one vault
+termius-backup gdrive sync on                   # turn it back on
+termius-backup gdrive sync on --name laptop     # turn just one back on
 ```
+
+With "off for all vaults" set, turning a single vault back on turns on
+**only that vault** — every other vault stays off.
+
+The same switch is available interactively: picking **Sync settings** in
+the no-subcommand menu shows the current state and toggles it per vault
+or for all vaults, and the post-backup offer's *"No — and don't ask me
+again"* option turns it off for just that vault.
 
 Turning a vault off also forgets its recorded baseline, so the next
 explicit `gdrive sync` for it starts from the current tree. The switch

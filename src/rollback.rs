@@ -41,7 +41,7 @@ pub fn run(opts: Options<'_>) -> Result<String> {
                 .iter()
                 .map(|m| format!("{}  ({})", m.id, m.reason))
                 .collect();
-            let idx = prompt::choose("Select a snapshot to roll back to", &labels)?;
+            let idx = prompt::choose("Select a snapshot to roll back to", &labels, 0)?;
             entries[idx].clone()
         }
     };

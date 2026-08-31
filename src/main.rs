@@ -242,15 +242,15 @@ fn run_gdrive(g: &Refs, action: GdriveAction) -> termius_secure_backup::error::R
                 );
             }
             Some(SyncCommand::On(t)) => {
-                let remaining = sync::sync_on(t.name.as_deref())?;
+                sync::sync_on(t.name.as_deref())?;
                 match t.name.as_deref() {
                     Some(n) => {
                         println!("Continuous sync turned back on for vault '{n}'.");
-                        if remaining.iter().any(|x| x == "*") {
+                        if sync::sync_globally_off() {
                             eprintln!(
-                                "Note: sync is still off for all other vaults — \
-                                 run 'gdrive sync on' without a name to turn \
-                                 that back on."
+                                "Note: '{n}' is on, but 'off for all vaults' \
+                                 is still set, so every other vault remains \
+                                 off."
                             );
                         }
                     }

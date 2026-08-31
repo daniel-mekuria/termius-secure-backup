@@ -220,16 +220,19 @@ pub fn ask_string(prompt: &str, default: Option<&str>) -> Result<String> {
 }
 
 /// Present a numbered menu of options and return the chosen index.
-pub fn choose(label: &str, options: &[String]) -> Result<usize> {
+/// `default` is the pre-selected option (what a bare Enter confirms on a
+/// TTY); it is clamped to the list bounds.
+pub fn choose(label: &str, options: &[String], default: usize) -> Result<usize> {
     if options.is_empty() {
         return Err(Error::NotFound("no options to choose from".into()));
     }
+    let default = default.min(options.len() - 1);
     if io::stdin().is_terminal() {
         let theme = dialoguer::theme::ColorfulTheme::default();
         let idx = dialoguer::Select::with_theme(&theme)
             .with_prompt(label)
             .items(options)
-            .default(0)
+            .default(default)
             .interact()
             .map_err(|e| Error::Canceled(format!("select failed: {e}")))?;
         Ok(idx)

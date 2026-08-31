@@ -25,13 +25,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scheduled runs upload exactly when Termius changed since the last run,
   and baselines survive reboots (the first run uploads the current tree).
 - Post-backup sync offer: after a successful `gdrive backup` (wizard or
-  direct), the tool asks whether to start the continuous sync; the
-  backup just made becomes the baseline so it is not re-uploaded.
+  direct), the tool offers the continuous sync with a three-way choice —
+  start it now, decline and never ask again for that vault, or decline
+  but ask again next time (a bare Enter keeps the old "decline, ask
+  again" behavior); accepting starts the watcher with the backup just
+  made as the baseline so it is not re-uploaded.
+- Interactive sync on/off: the no-subcommand menu gains a "Sync settings"
+  page that shows the current state of the post-backup offer (per vault
+  or for all vaults) and toggles it — no login needed, it only touches
+  local state. The offer's "No — and don't ask me again" option is the
+  same switch for a single vault.
 - `gdrive sync on` / `gdrive sync off [--name N]`: persistently
   (re)enable the post-backup continuous-sync offer, per vault or for all
-  vaults. Turning a vault off also forgets its recorded baseline, so the
-  next explicit sync of it starts from a fresh tree; explicit
-  `gdrive sync` runs are unaffected by the switch.
+  vaults. With "off for all vaults" set, turning one vault back on turns
+  on only that vault — every other vault stays off. Turning a vault off
+  also forgets its recorded baseline, so the next explicit sync of it
+  starts from a fresh tree; explicit `gdrive sync` runs are unaffected by
+  the switch.
 - `--keep N` retention flag: `gdrive backup --keep N` trims the vault to
   the newest N backups once per run; `gdrive sync --keep N` (default 10)
   applies it after every upload. `0` keeps everything (the old default

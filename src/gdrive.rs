@@ -1391,7 +1391,7 @@ pub fn run_restore(opts: RestoreOptions<'_>) -> Result<PathBuf> {
             )
         })
         .collect();
-    let vi = prompt::choose("Select a vault", &vault_labels)?;
+    let vi = prompt::choose("Select a vault", &vault_labels, 0)?;
     let vault = &vaults[vi];
 
     // 2. List and choose a backup.
@@ -1413,7 +1413,7 @@ pub fn run_restore(opts: RestoreOptions<'_>) -> Result<PathBuf> {
             format!("{}  ({} bytes, created {d})", b.name, b.size)
         })
         .collect();
-    let bi = prompt::choose("Select a backup to restore", &backup_labels)?;
+    let bi = prompt::choose("Select a backup to restore", &backup_labels, 0)?;
     let backup = &backups[bi];
 
     // 3. Download to a temp file.
