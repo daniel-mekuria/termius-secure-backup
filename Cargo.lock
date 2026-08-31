@@ -1309,7 +1309,6 @@ dependencies = [
  "sha2",
  "tar",
  "tempfile",
- "thiserror",
  "time",
  "tracing",
  "tracing-subscriber",

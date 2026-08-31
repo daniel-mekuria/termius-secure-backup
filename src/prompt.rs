@@ -28,8 +28,19 @@ pub fn read_password(prompt: &str) -> Result<String> {
 
 /// Read a password from a file (first line, trailing newline trimmed).
 pub fn read_password_file(path: &Path) -> Result<String> {
-    let s = std::fs::read_to_string(path)
-        .map_err(|e| Error::NotFound(format!("password file: {e}")))?;
+    let s = std::fs::read_to_string(path).map_err(|e| {
+        if e.kind() == io::ErrorKind::NotFound {
+            Error::NotFound(format!(
+                "password file not found: {} (create it, or pass the password another way)",
+                path.display()
+            ))
+        } else {
+            Error::NotFound(format!(
+                "could not read password file {}: {e}",
+                path.display()
+            ))
+        }
+    })?;
     Ok(s.trim_end_matches(['\r', '\n']).to_string())
 }
 
@@ -52,25 +63,28 @@ pub fn ask_password(
     let pw = read_password(&format!("{label}: "))?;
     if pw.is_empty() {
         return Err(Error::WeakPassword {
-            detail: "password is empty".into(),
+            detail: "the password is empty — enter a password to continue".into(),
         });
     }
     if must_confirm_reentry {
         let pw2 = read_password(&format!("confirm {label}: "))?;
         if pw != pw2 {
             return Err(Error::WeakPassword {
-                detail: "passwords did not match".into(),
+                detail: "the two passwords you entered did not match — try again".into(),
             });
         }
     }
     if let Strength::Weak { reason } = weakpass::assess(pw.as_bytes()) {
         if skip_weak_gate {
-            eprintln!("warning: weak password ({reason}) — proceeding without confirmation.");
+            eprintln!("warning: weak password: {reason} Proceeding without confirmation.");
             return Ok(pw);
         }
-        if !confirm(&format!("The password is weak ({reason}). Use it anyway?"))? {
+        if !confirm(&format!("The password is weak: {reason} Use it anyway?"))? {
             return Err(Error::WeakPassword {
-                detail: format!("user declined weak password: {reason}"),
+                detail: format!(
+                    "the password was rejected as weak ({reason}) — choose a \
+                     stronger one to continue"
+                ),
             });
         }
     }
@@ -103,7 +117,9 @@ pub fn confirm(question: &str) -> Result<bool> {
 pub fn ask_path(prompt: &str, suggested: &str) -> Result<String> {
     if io::stdin().is_terminal() {
         eprintln!("{prompt}");
-        eprintln!("  (press Enter to use the suggested default: {suggested})");
+        if !suggested.is_empty() {
+            eprintln!("  (press Enter to use the suggested default: {suggested})");
+        }
         let mut line = String::new();
         io::stdin().read_line(&mut line)?;
         let s = line.trim().to_string();

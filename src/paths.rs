@@ -2,9 +2,11 @@
 
 //! Per-OS path resolution: the Termius data directory and the snapshot store.
 
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
+use crate::prompt;
 
 /// The default Termius desktop `userData` directory for the current OS.
 ///
@@ -27,16 +29,32 @@ pub fn default_termius_dir() -> Result<PathBuf> {
 
 /// Resolve the Termius source directory from an explicit override or the
 /// auto-detected default. Validates that the path exists.
+///
+/// When no `--termius-dir` was given and the auto-detected default does not
+/// exist, an interactive (TTY) session is asked for the real path instead of
+/// failing outright — sandboxed builds (Mac App Store, Snap) store their
+/// data elsewhere, and fresh installs may not have run Termius yet.
 pub fn resolve_termius_dir(override_path: Option<&Path>) -> Result<PathBuf> {
-    let dir = match override_path {
-        Some(p) => p.to_path_buf(),
-        None => default_termius_dir()?,
-    };
+    match override_path {
+        Some(p) => validate_termius_dir(p),
+        None => {
+            let dir = default_termius_dir()?;
+            match validate_termius_dir(&dir) {
+                Ok(d) => Ok(d),
+                Err(e) if std::io::stdin().is_terminal() => interactive_termius_dir(&dir, e),
+                Err(e) => Err(e),
+            }
+        }
+    }
+}
+
+/// Check that `dir` exists and is a directory.
+fn validate_termius_dir(dir: &Path) -> Result<PathBuf> {
     if !dir.exists() {
         return Err(Error::NotFound(format!(
             "Termius data directory not found: {}
 If Termius is installed from the Mac App Store or Snap it is sandboxed and \
-uses a different path — pass it explicitly with --termius-dir <PATH>.",
+uses a different path — pass it with --termius-dir <PATH>.",
             dir.display()
         )));
     }
@@ -46,7 +64,55 @@ uses a different path — pass it explicitly with --termius-dir <PATH>.",
             dir.display()
         )));
     }
-    Ok(dir)
+    Ok(dir.to_path_buf())
+}
+
+/// Ask the user where their Termius data actually lives, and keep asking
+/// until they give an existing directory (or confirm a not-yet-created one,
+/// which is fine for restores onto a fresh machine).
+fn interactive_termius_dir(default: &Path, original: Error) -> Result<PathBuf> {
+    eprintln!("{original}");
+    loop {
+        let input = prompt::ask_path(
+            &format!(
+                "Enter the path to your Termius data directory \
+                 (the usual place is {}), or press Enter to give up:",
+                default.display()
+            ),
+            "",
+        )?;
+        if input.is_empty() {
+            return Err(Error::Canceled(
+                "no Termius data directory found, so there is nothing to back up".into(),
+            ));
+        }
+        let p = expand_tilde(&input);
+        if p.is_dir() {
+            return Ok(p);
+        }
+        if p.exists() {
+            eprintln!("That path is a file, not a directory: {}\n", p.display());
+            continue;
+        }
+        eprintln!("That path does not exist yet: {}", p.display());
+        if prompt::confirm("Use it anyway (restores can target a fresh directory)?")? {
+            return Ok(p);
+        }
+        eprintln!();
+    }
+}
+
+/// Expand a leading `~` to the user's home directory.
+fn expand_tilde(p: &str) -> PathBuf {
+    if p == "~" {
+        return dirs::home_dir().unwrap_or_else(|| PathBuf::from(p));
+    }
+    if let Some(rest) = p.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(rest);
+        }
+    }
+    PathBuf::from(p)
 }
 
 /// The default snapshot store root.
@@ -101,6 +167,25 @@ pub fn resolve_gdrive_creds_path(override_path: Option<&Path>) -> Result<PathBuf
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expand_tilde_home() {
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(expand_tilde("~"), home);
+        assert_eq!(
+            expand_tilde("~/config/Termius"),
+            home.join("config/Termius")
+        );
+    }
+
+    #[test]
+    fn expand_tilde_leaves_other_paths_alone() {
+        assert_eq!(
+            expand_tilde("/home/u/.config/Termius"),
+            PathBuf::from("/home/u/.config/Termius")
+        );
+        assert_eq!(expand_tilde("relative/dir"), PathBuf::from("relative/dir"));
+    }
 
     #[test]
     fn default_termius_dir_ends_with_termius() {

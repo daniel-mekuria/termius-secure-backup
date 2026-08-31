@@ -114,11 +114,11 @@ pub fn acquire_password(
 fn warn_if_weak(pw: &str, skip_weak_gate: bool) {
     if let weakpass::Strength::Weak { reason } = weakpass::assess(pw.as_bytes()) {
         if skip_weak_gate {
-            eprintln!("warning: weak password ({reason}).");
+            eprintln!("warning: weak password: {reason}");
         } else {
             eprintln!(
-                "warning: weak password ({reason}). Re-run interactively to be prompted, \
-                 or pass --yes to accept."
+                "warning: weak password: {reason} Re-run interactively to be \
+                 prompted, or pass --yes to accept."
             );
         }
     }

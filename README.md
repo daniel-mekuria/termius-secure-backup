@@ -18,8 +18,9 @@ backup you fully control.
 > **Snap** run in a sandbox and use different, sandbox-specific paths, and
 > the Snap build cannot access normal local storage. `termius-backup`
 > auto-detects the standard Electron path per OS and lets you override it
-> with `--termius-dir`. If the auto-detected path is missing you will get a
-> clear error — point the flag at your real Termius directory.
+> with `--termius-dir`. If the auto-detected path is missing, an
+> interactive run asks you for the real path (and a non-interactive one
+> gets a clear error) — point the flag at your real Termius directory.
 
 ---
 
