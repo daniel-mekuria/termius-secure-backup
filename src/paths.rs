@@ -49,7 +49,7 @@ fn local_data_dir() -> Option<PathBuf> {
 
 /// The user's home directory. Same environment-first treatment as
 /// [`config_dir`] for `USERPROFILE`.
-fn home_dir() -> Option<PathBuf> {
+pub(crate) fn home_dir() -> Option<PathBuf> {
     #[cfg(windows)]
     {
         std::env::var_os("USERPROFILE")

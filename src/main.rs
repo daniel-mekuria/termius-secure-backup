@@ -12,7 +12,7 @@ use termius_secure_backup::cli::{
 use termius_secure_backup::error::ExitCode as AppExitCode;
 use termius_secure_backup::util;
 use termius_secure_backup::{
-    backup, container, crypto, gdrive, paths, restore, rollback, snapshot, sync, wizard,
+    backup, container, crypto, gdrive, install, paths, restore, rollback, snapshot, sync, wizard,
 };
 
 fn main() -> ExitCode {
@@ -45,6 +45,7 @@ fn main() -> ExitCode {
         Some(Command::Info(a)) => run_info(a),
         Some(Command::Snapshots(a)) => run_snapshots(&g, a.action),
         Some(Command::Gdrive(a)) => run_gdrive(&g, a.action),
+        Some(Command::Install) => install::run(g.yes),
         None => run_wizard(&g),
     };
     match result {

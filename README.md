@@ -41,7 +41,8 @@ cargo build --release
 
 Download the latest binary for your platform from the
 [releases page](https://github.com/daniel-mekuria/termius-secure-backup/releases)
-and put it on your `PATH`.
+and put it on your `PATH` — or just run `termius-backup install` and it will
+do that for you.
 
 ---
 
@@ -77,6 +78,7 @@ What would you like to do?
   [1] Backup
   [2] Restore
   [3] Sync settings
+  [4] Add to PATH
 Back up to where?
   [1] Local file
   [2] Google Drive
@@ -91,6 +93,8 @@ Back up to where?
   continuous-sync offer and lets you turn it off or back on, for one vault
   or for all — the interactive version of `gdrive sync off` / `gdrive sync
   on`. No login is needed; it only touches local state.
+- **Add to PATH** → the interactive version of `install`: puts
+  `termius-backup` on your PATH so it can be run from anywhere (see below).
 
 All global flags (`--termius-dir`, `--password-file`, …) still apply. In a
 non-interactive session (no TTY) a bare invocation is a usage error — pass a
@@ -146,6 +150,26 @@ termius-backup rollback
 termius-backup snapshots list        # list tagged rollback snapshots
 termius-backup snapshots prune --keep 10   # keep the newest 10 per source dir
 ```
+
+### Add to PATH
+
+```sh
+termius-backup install
+```
+
+Makes `termius-backup` runnable from any directory:
+
+- **Linux/macOS** — symlinks the running binary into `~/.local/bin`, and if
+  that directory is not already on the PATH, appends a PATH line to your
+  shell's rc file — `~/.bashrc`, `~/.zshrc`, or
+  `~/.config/fish/config.fish`, chosen from `$SHELL` (`~/.profile` when the
+  shell is not one of those).
+- **Windows** — adds the binary's directory to the *user* PATH in the
+  registry (`HKCU\Environment`); the machine PATH is left alone.
+
+A new terminal picks the change up (or `source` the rc file). It is
+idempotent: re-running when the binary is already reachable from the PATH
+reports that and changes nothing.
 
 ### Google Drive backups
 

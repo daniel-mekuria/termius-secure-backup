@@ -13,6 +13,7 @@ pub mod container;
 pub mod crypto;
 pub mod error;
 pub mod gdrive;
+pub mod install;
 pub mod paths;
 pub mod prompt;
 pub mod restore;

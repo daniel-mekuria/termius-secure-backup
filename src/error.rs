@@ -131,7 +131,7 @@ impl std::fmt::Display for Error {
             E::NoSubcommand => write!(
                 f,
                 "no subcommand and no interactive terminal for the menu — \
-                 pass one of: backup, restore, rollback, info, snapshots, gdrive (see --help)"
+                 pass one of: backup, restore, rollback, info, snapshots, gdrive, install (see --help)"
             ),
             E::Other(msg) => write!(f, "{msg}"),
         }

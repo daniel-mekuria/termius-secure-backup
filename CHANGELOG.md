@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `termius-backup install` (and "Add to PATH" in the interactive menu): puts
+  the running binary on the user's PATH so it can be run from anywhere. On
+  Linux/macOS it symlinks the binary into `~/.local/bin` and, if that
+  directory is not already on the PATH, appends a PATH line to the shell rc
+  file that matches `$SHELL` (`~/.bashrc`, `~/.zshrc`,
+  `~/.config/fish/config.fish`, or `~/.profile`); on Windows it appends the
+  binary's directory to the user PATH in the registry, preserving whether
+  the value is REG_SZ or REG_EXPAND_SZ. Idempotent — re-running when the
+  binary is already reachable from the PATH reports that and changes
+  nothing.
+
 ## [0.3.1] - 2026-08-31
 
 ### Added

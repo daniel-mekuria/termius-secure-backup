@@ -86,6 +86,8 @@ pub enum Command {
     Snapshots(SnapshotsArgs),
     /// Back up and restore over Google Drive.
     Gdrive(GdriveArgs),
+    /// Add termius-backup to your PATH so it can be run from anywhere.
+    Install,
 }
 
 #[derive(Args, Debug, Default)]

@@ -2,12 +2,14 @@
 
 //! Interactive wizard shown when `termius-backup` is run with no subcommand.
 //!
-//! Page 1 selects the action (backup / restore / sync settings); page 2
-//! selects the backend (local file / Google Drive). The Google Drive branch
-//! runs the login flow when no credentials are stored yet, and simply asks
-//! for the master password when already logged in (both handled by the
-//! session open). "Sync settings" toggles the post-backup continuous-sync
-//! offer — per vault or for all vaults — without needing a login.
+//! Page 1 selects the action (backup / restore / sync settings / add to
+//! PATH); page 2 selects the backend (local file / Google Drive). The
+//! Google Drive branch runs the login flow when no credentials are stored
+//! yet, and simply asks for the master password when already logged in
+//! (both handled by the session open). "Sync settings" toggles the
+//! post-backup continuous-sync offer — per vault or for all vaults — without
+//! needing a login. "Add to PATH" is the interactive version of
+//! `termius-backup install`.
 
 use std::io::IsTerminal;
 use std::path::Path;
@@ -41,12 +43,16 @@ pub fn run(g: &Flags) -> Result<()> {
             "Backup".to_string(),
             "Restore".to_string(),
             "Sync settings".to_string(),
+            "Add to PATH".to_string(),
         ],
         0,
     )?;
 
     if action == 2 {
         return sync_settings();
+    }
+    if action == 3 {
+        return crate::install::run(g.yes);
     }
 
     // Page 2: backend.
