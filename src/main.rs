@@ -12,7 +12,8 @@ use termius_secure_backup::cli::{
 use termius_secure_backup::error::ExitCode as AppExitCode;
 use termius_secure_backup::util;
 use termius_secure_backup::{
-    backup, container, crypto, gdrive, install, paths, restore, rollback, snapshot, sync, wizard,
+    backup, container, crypto, gdrive, install, paths, restore, rollback, service, snapshot, sync,
+    wizard,
 };
 
 fn main() -> ExitCode {
@@ -28,6 +29,7 @@ fn main() -> ExitCode {
         password_file,
         password_env,
         creds_file,
+        service_secrets,
         yes,
     } = globals;
     let g = Refs {
@@ -36,18 +38,29 @@ fn main() -> ExitCode {
         password_file,
         password_env,
         creds_file,
+        service_secrets,
         yes,
     };
-    let result = match command {
-        Some(Command::Backup(a)) => run_backup(&g, a),
-        Some(Command::Restore(a)) => run_restore(&g, a),
-        Some(Command::Rollback(a)) => run_rollback(&g, a),
-        Some(Command::Info(a)) => run_info(a),
-        Some(Command::Snapshots(a)) => run_snapshots(&g, a.action),
-        Some(Command::Gdrive(a)) => run_gdrive(&g, a.action),
-        Some(Command::Install) => install::run(g.yes),
-        None => run_wizard(&g),
-    };
+    let result = (|| -> termius_secure_backup::error::Result<()> {
+        // `--service-secrets` feeds both passwords to the run through
+        // environment variables (one-shot reads, no prompts) — this is how
+        // the continuous-sync background service authenticates.
+        if let Some(p) = &g.service_secrets {
+            let s = service::read_secrets(p)?;
+            std::env::set_var("TSBAK_GDRIVE_MASTER_PASSWORD", &s.master_password);
+            std::env::set_var("TSBAK_SERVICE_BACKUP_PASSWORD", &s.backup_password);
+        }
+        match command {
+            Some(Command::Backup(a)) => run_backup(&g, a),
+            Some(Command::Restore(a)) => run_restore(&g, a),
+            Some(Command::Rollback(a)) => run_rollback(&g, a),
+            Some(Command::Info(a)) => run_info(a),
+            Some(Command::Snapshots(a)) => run_snapshots(&g, a.action),
+            Some(Command::Gdrive(a)) => run_gdrive(&g, a.action),
+            Some(Command::Install) => install::run(g.yes),
+            None => run_wizard(&g),
+        }
+    })();
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -64,6 +77,7 @@ struct Refs {
     password_file: Option<std::path::PathBuf>,
     password_env: Option<String>,
     creds_file: Option<std::path::PathBuf>,
+    service_secrets: Option<std::path::PathBuf>,
     yes: bool,
 }
 
@@ -78,10 +92,19 @@ impl Refs {
         self.password_file.as_deref()
     }
     fn password_env(&self) -> Option<&str> {
-        self.password_env.as_deref()
+        // With `--service-secrets` the backup password was loaded from the
+        // secrets file into this variable (see `main`); it wins over an
+        // explicit `--password-env`.
+        self.service_secrets
+            .as_ref()
+            .map(|_| "TSBAK_SERVICE_BACKUP_PASSWORD")
+            .or(self.password_env.as_deref())
     }
     fn creds_file(&self) -> Option<&std::path::Path> {
         self.creds_file.as_deref()
+    }
+    fn service_secrets(&self) -> Option<&std::path::Path> {
+        self.service_secrets.as_deref()
     }
 }
 
@@ -93,6 +116,7 @@ fn run_wizard(g: &Refs) -> termius_secure_backup::error::Result<()> {
         password_file: g.password_file(),
         password_env: g.password_env(),
         creds_file: g.creds_file(),
+        service_secrets: g.service_secrets(),
         yes: g.yes,
     })
 }
@@ -186,6 +210,11 @@ fn run_snapshots(g: &Refs, action: SnapshotsAction) -> termius_secure_backup::er
 
 fn run_gdrive(g: &Refs, action: GdriveAction) -> termius_secure_backup::error::Result<()> {
     let creds = paths::resolve_gdrive_creds_path(g.creds_file())?;
+    let ctx = sync::ServiceCtx {
+        creds_path: &creds,
+        yes: g.yes,
+        secrets_file: g.service_secrets(),
+    };
     match action {
         GdriveAction::Login => gdrive::run_login(&creds)?,
         GdriveAction::Logout => gdrive::run_logout(&creds)?,
@@ -201,14 +230,7 @@ fn run_gdrive(g: &Refs, action: GdriveAction) -> termius_secure_backup::error::R
                 keep: a.keep,
             })?;
             eprintln!("Done: backup in vault '{vault}' (Drive file {file_id})");
-            sync::offer_after_backup(
-                g.termius_dir(),
-                g.password_file(),
-                g.password_env(),
-                &creds,
-                g.yes,
-                &vault,
-            );
+            sync::offer_after_backup(g.termius_dir(), &ctx, &vault);
         }
         GdriveAction::Restore => {
             let p = gdrive::run_restore(gdrive::RestoreOptions {
@@ -223,17 +245,28 @@ fn run_gdrive(g: &Refs, action: GdriveAction) -> termius_secure_backup::error::R
         }
         GdriveAction::Sync(a) => match a.command {
             Some(SyncCommand::Off(t)) => {
+                let had_service = t
+                    .name
+                    .as_deref()
+                    .map(service::service_installed)
+                    .unwrap_or(false);
                 sync::sync_off(t.name.as_deref())?;
                 match t.name.as_deref() {
                     Some(n) => println!(
-                        "Continuous sync turned off for vault '{n}' — I will \
-                         stop suggesting it after backups. Re-enable with \
-                         'gdrive sync on'."
+                        "Continuous sync turned off for vault '{n}'{} \
+                         — I will stop suggesting it after backups. \
+                         Re-enable with 'gdrive sync on'.",
+                        if had_service {
+                            " — the background service was stopped and removed"
+                        } else {
+                            ""
+                        }
                     ),
                     None => println!(
-                        "Continuous sync turned off for all vaults — I will \
-                         stop suggesting it after backups. Re-enable with \
-                         'gdrive sync on'."
+                        "Continuous sync turned off for all vaults — every \
+                         background sync service was stopped and removed; I \
+                         will stop suggesting it after backups. Re-enable \
+                         with 'gdrive sync on'."
                     ),
                 }
                 eprintln!(
@@ -243,10 +276,15 @@ fn run_gdrive(g: &Refs, action: GdriveAction) -> termius_secure_backup::error::R
                 );
             }
             Some(SyncCommand::On(t)) => {
-                sync::sync_on(t.name.as_deref())?;
+                sync::sync_on(t.name.as_deref(), &ctx)?;
                 match t.name.as_deref() {
                     Some(n) => {
-                        println!("Continuous sync turned back on for vault '{n}'.");
+                        println!(
+                            "Continuous sync turned on for vault '{n}' — the \
+                             background service {id} is running and will \
+                             survive reboots. Stop it with 'gdrive sync off'.",
+                            id = service::service_id(n)
+                        );
                         if sync::sync_globally_off() {
                             eprintln!(
                                 "Note: '{n}' is on, but 'off for all vaults' \
@@ -256,7 +294,11 @@ fn run_gdrive(g: &Refs, action: GdriveAction) -> termius_secure_backup::error::R
                         }
                     }
                     None => {
-                        println!("Continuous sync turned back on for all vaults.");
+                        println!(
+                            "Continuous sync turned back on for all vaults. \
+                             (The background service is per-vault: use \
+                             'gdrive sync on --name N' to start one.)"
+                        );
                     }
                 }
             }

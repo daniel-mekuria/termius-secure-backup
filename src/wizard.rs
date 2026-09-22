@@ -6,9 +6,11 @@
 //! PATH); page 2 selects the backend (local file / Google Drive). The
 //! Google Drive branch runs the login flow when no credentials are stored
 //! yet, and simply asks for the master password when already logged in
-//! (both handled by the session open). "Sync settings" toggles the
-//! post-backup continuous-sync offer — per vault or for all vaults — without
-//! needing a login. "Add to PATH" is the interactive version of
+//! (both handled by the session open). "Sync settings" turns the
+//! continuous sync on or off — per vault or for all vaults; turning a
+//! vault on installs its background service (prompting for the two
+//! passwords once, when they were never stored), turning it off removes
+//! the service. "Add to PATH" is the interactive version of
 //! `termius-backup install`.
 
 use std::io::IsTerminal;
@@ -26,6 +28,7 @@ pub struct Flags<'a> {
     pub password_file: Option<&'a Path>,
     pub password_env: Option<&'a str>,
     pub creds_file: Option<&'a Path>,
+    pub service_secrets: Option<&'a Path>,
     pub yes: bool,
 }
 
@@ -49,7 +52,7 @@ pub fn run(g: &Flags) -> Result<()> {
     )?;
 
     if action == 2 {
-        return sync_settings();
+        return sync_settings(g);
     }
     if action == 3 {
         return crate::install::run(g.yes);
@@ -74,12 +77,14 @@ pub fn run(g: &Flags) -> Result<()> {
     }
 }
 
-/// Interactive toggle for the continuous-sync offer: shows the current
-/// state and lets the user turn it off or back on, per vault or for all
-/// vaults. Pure local state — no login or Termius directory needed.
-fn sync_settings() -> Result<()> {
+/// Interactive toggle for continuous sync: shows the current state and
+/// lets the user turn it off or back on, per vault or for all vaults.
+/// Turning a vault on (or all vaults, per vault) installs its background
+/// service; the two passwords are prompted once, when no secrets file
+/// exists yet, and reused afterwards.
+fn sync_settings(g: &Flags) -> Result<()> {
     let state = sync::sync_status();
-    eprintln!("The post-backup continuous-sync offer is currently {state}.");
+    eprintln!("Continuous sync is currently {state}.");
 
     let choice = prompt::choose(
         "What would you like to change?",
@@ -91,28 +96,50 @@ fn sync_settings() -> Result<()> {
         ],
         0,
     )?;
+    let creds = paths::resolve_gdrive_creds_path(g.creds_file)?;
+    let ctx = sync::ServiceCtx {
+        creds_path: &creds,
+        yes: g.yes,
+        secrets_file: g.service_secrets,
+    };
     match choice {
         0 => {
             sync::sync_off(None)?;
+            eprintln!(
+                "Continuous sync is now off for all vaults — every \
+                 background sync service was stopped and removed."
+            );
         }
         1 => {
             let name = prompt::ask_string("Vault name:", None)?;
             sync::sync_off(Some(&name))?;
+            eprintln!(
+                "Continuous sync is now off for vault '{name}' — its \
+                 background service (if any) was stopped and removed."
+            );
         }
         2 => {
-            sync::sync_on(None)?;
+            sync::sync_on(None, &ctx)?;
+            eprintln!(
+                "Continuous sync is now on for all vaults. (The background \
+                 service is per-vault: use 'gdrive sync on --name N' — or \
+                 this menu — to start one.)"
+            );
         }
         _ => {
             let name = prompt::ask_string("Vault name:", None)?;
-            let remaining = sync::sync_on(Some(&name))?;
+            let remaining = sync::sync_on(Some(&name), &ctx)?;
             if remaining.iter().any(|x| x == "*") {
                 eprintln!(
                     "Vault '{name}' is now on; all other vaults remain off \
                      ('off for all vaults' is still set)."
                 );
-            } else {
-                eprintln!("Vault '{name}' is now on.");
             }
+            eprintln!(
+                "Continuous sync for vault '{name}' is now running in the \
+                 background ({id}) — it survives reboots.",
+                id = crate::service::service_id(&name),
+            );
         }
     }
     eprintln!("Done.");
@@ -150,14 +177,12 @@ fn backup_gdrive(g: &Flags) -> Result<()> {
         keep: 0, // one-shot backup keeps everything by default
     })?;
     eprintln!("Done: backup in vault '{vault}' (Drive file {file_id})");
-    sync::offer_after_backup(
-        g.termius_dir,
-        g.password_file,
-        g.password_env,
-        &creds,
-        g.yes,
-        &vault,
-    );
+    let ctx = sync::ServiceCtx {
+        creds_path: &creds,
+        yes: g.yes,
+        secrets_file: g.service_secrets,
+    };
+    sync::offer_after_backup(g.termius_dir, &ctx, &vault);
     Ok(())
 }
 

@@ -8,6 +8,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Continuous sync now runs as a **background service** that keeps going
+  after the terminal closes and after reboots, until explicitly turned
+  off. Accepting the post-backup offer, or `gdrive sync on --name N`
+  (CLI or the interactive "Sync settings" menu), installs and starts a
+  per-vault service that runs the continuous-sync watcher unattended —
+  a systemd *user* unit
+  (`~/.config/systemd/user/termius-backup-sync-<vault>.service`,
+  `Restart=always`) on Linux, a launchd LaunchAgent
+  (`~/Library/LaunchAgents/com.termius-secure-backup.sync-<vault>.plist`,
+  `KeepAlive`, logging to
+  `~/Library/Logs/termius-backup-sync-<vault>.log`) on macOS, and a Task
+  Scheduler logon task on Windows. The first "on" for a vault asks for
+  the two passwords an unattended run needs (the Google Drive master
+  password and the backup password) once and stores them in an owner-only
+  `~/.config/termius-secure-backup/sync-service-<vault>.json`, reused on
+  later runs; `gdrive sync off --name N` (or without `--name`, for every
+  vault) stops and removes the service and deletes that secrets file.
+  Accepting the post-backup offer now installs the service (the backup
+  just made becomes its baseline) instead of starting a foreground
+  watcher.
+- New global `--service-secrets <file>` flag: reads the Google Drive
+  master password and the backup password from a JSON file
+  (`{"master_password": "...", "backup_password": "..."}`) instead of
+  prompting — how the background service authenticates, and available on
+  any subcommand for unattended runs.
 - `termius-backup install` (and "Add to PATH" in the interactive menu): puts
   the running binary on the user's PATH so it can be run from anywhere. On
   Linux/macOS it symlinks the binary into `~/.local/bin` and, if that

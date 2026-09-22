@@ -80,8 +80,10 @@ fn gdrive_sync_help_lists_on_off_subcommands() {
     }
 }
 
-/// `gdrive sync off` / `on` are pure local state operations: no login, no
-/// Termius directory, no credentials file required.
+/// `gdrive sync off` (per vault or all) and `gdrive sync on` *without* a
+/// vault name are pure local state operations: no login, no Termius
+/// directory, no credentials file required. A per-vault `on` installs the
+/// background service and therefore needs the stored credentials first.
 #[test]
 fn gdrive_sync_off_on_round_trip_is_local_only() {
     let tmp = tempfile::tempdir().unwrap();
@@ -93,12 +95,28 @@ fn gdrive_sync_off_on_round_trip_is_local_only() {
             "Continuous sync turned off for vault 'laptop'",
         ));
     isolated(&tmp)
-        .args(["gdrive", "sync", "on", "--name", "laptop"])
+        .args(["gdrive", "sync", "off"])
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Continuous sync turned back on for vault 'laptop'",
+            "Continuous sync turned off for all vaults",
         ));
+    // Global on installs no service — still pure local state.
+    isolated(&tmp)
+        .args(["gdrive", "sync", "on"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Continuous sync turned back on for all vaults",
+        ));
+    // Per-vault on installs the background service: without stored
+    // credentials it fails with a login hint, not with a service error.
+    isolated(&tmp)
+        .args(["gdrive", "sync", "on", "--name", "laptop"])
+        .assert()
+        .failure()
+        .code(3) // ExitCode::Auth
+        .stderr(predicate::str::contains("not logged in"));
 }
 
 #[test]

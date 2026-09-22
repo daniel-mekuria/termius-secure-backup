@@ -36,6 +36,7 @@ use crate::error::{Error, Result};
 use crate::gdrive;
 use crate::paths;
 use crate::prompt;
+use crate::service;
 use crate::util;
 
 /// Cheap fingerprint of a directory tree. Any change to a file's presence,
@@ -274,16 +275,84 @@ pub fn sync_status() -> String {
     }
 }
 
-/// Turn the continuous-sync offer off for `vault` (or every vault when
-/// `None`). Returns the list of off markers now in effect ("*" = all).
+/// What [`sync_on`] / [`sync_off`] need to manage the vault's background
+/// service alongside the offer state.
+pub struct ServiceCtx<'a> {
+    /// The Google credential store the service's master password unlocks.
+    pub creds_path: &'a Path,
+    /// Skip the confirmation prompts.
+    pub yes: bool,
+    /// A `--service-secrets` file to read the two passwords from (or
+    /// create) instead of prompting.
+    pub secrets_file: Option<&'a Path>,
+}
+
+/// Turn continuous sync off for `vault` (or every vault when `None`):
+/// stop and remove the vault's background service, forget the recorded
+/// baseline, and stop suggesting it after backups. Returns the list of
+/// off markers now in effect ("*" = all).
 pub fn sync_off(vault: Option<&str>) -> Result<Vec<String>> {
+    match vault {
+        Some(v) => {
+            let removed = service::remove_service(v)?;
+            drop_secrets(v, removed);
+        }
+        None => {
+            for slug in service::installed_vaults() {
+                let removed = service::remove_service(&slug)?;
+                drop_secrets(&slug, removed);
+            }
+        }
+    }
     toggle_sync_off(&paths::sync_state_path()?, vault, true)
 }
 
-/// Turn the continuous-sync offer back on for `vault` (or every vault).
-/// Returns the list of off markers still in effect.
-pub fn sync_on(vault: Option<&str>) -> Result<Vec<String>> {
+/// Turn continuous sync back on for `vault` (or every vault): start the
+/// vault's background service — it keeps syncing with the terminal closed
+/// and across reboots, until turned off with `gdrive sync off` — and
+/// re-enable the post-backup offer. Returns the list of off markers still
+/// in effect.
+pub fn sync_on(vault: Option<&str>, ctx: &ServiceCtx) -> Result<Vec<String>> {
+    // The background service is per-vault; a global "on" (no vault name)
+    // only re-enables the offer and installs no service.
+    if let Some(v) = vault {
+        ensure_sync_service(v, ctx)?;
+    }
     toggle_sync_off(&paths::sync_state_path()?, vault, false)
+}
+
+/// Make sure the background service for `vault` is installed and running:
+/// ensure a secrets file with the two passwords exists (prompting for
+/// them when none does) and (re)install the service.
+fn ensure_sync_service(vault: &str, ctx: &ServiceCtx) -> Result<()> {
+    let secrets_path = match ctx.secrets_file {
+        Some(p) => p.to_path_buf(),
+        None => paths::service_secrets_path(vault)?,
+    };
+    if !secrets_path.is_file() {
+        let master_password = gdrive::master_password(ctx.creds_path)?;
+        let backup_password = backup::acquire_password(None, None, true, ctx.yes)?;
+        service::write_secrets(
+            &secrets_path,
+            &service::ServiceSecrets {
+                master_password,
+                backup_password,
+            },
+        )?;
+    }
+    service::install_service(vault, &secrets_path)
+}
+
+/// Remove a vault's default secrets file. Best-effort — the service is
+/// already gone, so a leftover file is not worth failing the run. Custom
+/// `--service-secrets` files are never touched.
+fn drop_secrets(vault: &str, removed: bool) {
+    if !removed {
+        return;
+    }
+    if let Ok(p) = paths::service_secrets_path(vault) {
+        let _ = std::fs::remove_file(&p);
+    }
 }
 
 /// Scheduling parameters for the sync loop.
@@ -693,20 +762,15 @@ fn zeroize(buf: &mut [u8]) {
 /// After a successful `gdrive backup`, offer to keep the vault up to date
 /// automatically. The offer is an interactive three-way choice: start
 /// syncing now, decline, or decline *and stop being asked about this
-/// vault* (which records a `gdrive sync off` for it). No-ops when `--yes`
-/// was passed, stdin is not a TTY (CI / pipes), or the offer was turned
-/// off with `gdrive sync off`; and it swallows sync errors with a message
-/// — the backup itself already succeeded, and a declined or failed sync
-/// should not fail the run.
-pub fn offer_after_backup(
-    termius_dir: Option<&Path>,
-    password_file: Option<&Path>,
-    password_env: Option<&str>,
-    creds_path: &Path,
-    yes: bool,
-    vault_name: &str,
-) {
-    if yes || !std::io::stdin().is_terminal() {
+/// vault* (which records a `gdrive sync off` for it). Accepting installs
+/// the continuous sync as a background service — it keeps running after
+/// this terminal closes and after reboots, until `gdrive sync off`. The
+/// offer no-ops when `--yes` was passed, stdin is not a TTY (CI / pipes),
+/// or the offer was turned off with `gdrive sync off`; and it swallows
+/// setup errors with a message — the backup itself already succeeded, and
+/// a declined or failed sync start should not fail the run.
+pub fn offer_after_backup(termius_dir: Option<&Path>, ctx: &ServiceCtx, vault_name: &str) {
+    if ctx.yes || !std::io::stdin().is_terminal() {
         return;
     }
     let base = gdrive::vault_base_name(vault_name);
@@ -716,7 +780,11 @@ pub fn offer_after_backup(
     }
     // A bare Enter keeps the old behavior (decline, ask again next time).
     let choice = match prompt::choose(
-        &format!("Back up to Google Drive continuously while Termius changes? (vault '{base}')"),
+        &format!(
+            "Back up to Google Drive continuously while Termius changes? (vault '{base}')\n\
+             (it runs as a background service that survives reboots — \
+             'gdrive sync off' stops it)"
+        ),
         &[
             "Yes — start continuous sync now".to_string(),
             format!("No — and don't ask me again for '{base}'"),
@@ -749,7 +817,8 @@ pub fn offer_after_backup(
         }
     };
     // Baseline = the tree as it stands now (right after the backup), so the
-    // first upload only happens when Termius actually changes something.
+    // service's first upload only happens when Termius actually changes
+    // something. Also remember the directory for the service's runs.
     let last_sig = match dir_signature(&src) {
         Ok(s) => s,
         Err(e) => {
@@ -757,22 +826,16 @@ pub fn offer_after_backup(
             return;
         }
     };
+    remember_termius_dir(&src);
+    record_sync_state(base, last_sig);
 
-    let opts = SyncOptions {
-        termius_dir: Some(&src),
-        name: Some(base),
-        password_file,
-        password_env,
-        creds_path,
-        yes,
-        interval: 60,
-        keep: 10,
-        once: false,
-        last_sig: Some(last_sig),
-        kdf: KdfParams::default(),
-    };
-    if let Err(e) = run_sync(opts) {
-        eprintln!("Sync stopped: {e}");
+    match sync_on(Some(base), ctx) {
+        Ok(_) => eprintln!(
+            "Continuous sync for vault '{base}' is now running in the background \
+             ({id}).\nIt survives reboots — stop it with 'gdrive sync off'.",
+            id = service::service_id(base),
+        ),
+        Err(e) => eprintln!("Sync not started: {e}"),
     }
 }
 

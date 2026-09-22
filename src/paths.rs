@@ -8,7 +8,10 @@ use std::path::{Path, PathBuf};
 use crate::error::{Error, Result};
 use crate::prompt;
 
-/// The per-user config directory. On Windows the classic `%APPDATA%`
+/// The per-user config directory (visible to the crate so
+/// [`crate::service`] can place the systemd user unit under
+/// `$XDG_CONFIG_HOME/systemd/user` like the rest of the config). On
+/// Windows the classic `%APPDATA%`
 /// environment variable is honored first: `dirs::config_dir()` there
 /// resolves the Roaming AppData *known folder* via `SHGetKnownFolderPath`,
 /// which ignores environment variables and fails (returns `None`) when the
@@ -17,7 +20,7 @@ use crate::prompt;
 /// variable and the known folder point at the same directory for regular
 /// users, so behavior is unchanged. On Linux/macOS `dirs` already honors
 /// `$XDG_CONFIG_HOME`/`$HOME`, so it is used directly.
-fn config_dir() -> Option<PathBuf> {
+pub(crate) fn config_dir() -> Option<PathBuf> {
     #[cfg(windows)]
     {
         std::env::var_os("APPDATA")
@@ -240,6 +243,21 @@ pub fn sync_state_path() -> Result<PathBuf> {
         Error::NotFound("could not determine the user config directory for this OS".to_string())
     })?;
     Ok(base.join("termius-secure-backup").join("sync-state.json"))
+}
+
+/// The secrets file for a vault's continuous-sync background service:
+/// `<config dir>/termius-secure-backup/sync-service-<vault>.json`. It holds
+/// the two passwords an unattended sync run needs (the Google Drive master
+/// password and the backup password) as JSON, written with owner-only
+/// read/write permissions. See [`crate::service`].
+pub fn service_secrets_path(vault: &str) -> Result<PathBuf> {
+    let base = config_dir().ok_or_else(|| {
+        Error::NotFound("could not determine the user config directory for this OS".to_string())
+    })?;
+    Ok(base.join("termius-secure-backup").join(format!(
+        "sync-service-{}.json",
+        crate::service::service_slug(vault)
+    )))
 }
 
 #[cfg(test)]

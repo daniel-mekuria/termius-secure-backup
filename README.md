@@ -89,10 +89,12 @@ Back up to where?
 - **Google Drive** → runs the login flow if you are not logged in yet; if you
   are, it asks for your master password, then continues (vault name + backup
   password for backup, vault/backup selection for restore).
-- **Sync settings** → shows the current state of the post-backup
-  continuous-sync offer and lets you turn it off or back on, for one vault
-  or for all — the interactive version of `gdrive sync off` / `gdrive sync
-  on`. No login is needed; it only touches local state.
+- **Sync settings** → shows the current state of continuous sync and lets
+  you turn it off or back on, for one vault or for all — the interactive
+  version of `gdrive sync off` / `gdrive sync on`. Turning a vault on
+  installs its background service (see *The background service*), which
+  asks for the two unattended passwords once when they were never stored;
+  turning things off only touches local state.
 - **Add to PATH** → the interactive version of `install`: puts
   `termius-backup` on your PATH so it can be run from anywhere (see below).
 
@@ -225,9 +227,11 @@ data directory and uploads a fresh encrypted `.tsb` whenever it changes.
 After a successful `gdrive backup` the tool also offers continuous sync,
 with a three-way choice:
 
-- **Yes — start continuous sync now** starts the same watcher (the backup
-  you just made becomes the baseline, so nothing is re-uploaded a moment
-  later).
+- **Yes — start continuous sync now** installs the continuous sync as a
+  background service (see *The background service* below): the backup
+  you just made becomes the baseline, so the service's first upload only
+  happens when Termius actually changes something. It keeps running after
+  this terminal closes and after reboots, until you stop it.
 - **No — and don't ask me again for '<vault>'** turns the offer off for
   that vault, so it will not be asked again (see *Turning sync off* below).
 - **No — ask me again next time** declines once; the question is asked
@@ -262,12 +266,11 @@ termius-backup gdrive sync --name laptop --once
   *that record*, not against themselves, so a scheduled run uploads exactly
   when Termius has changed since the last run — even across reboots. The very
   first run (no record yet) uploads the current tree.
-- **The watcher itself is a foreground process**: `gdrive sync` without
-  `--once` stops when you Ctrl-C it or the machine reboots. For a
-  reboot-proof sync, run it `--once` from a systemd timer (below) —
-  `Persistent=true` makes the timer fire the missed run right after a
-  reboot. (A systemd service with `Restart=always` around the long-running
-  watcher also works, if you prefer.)
+- **Two ways to keep it running**: `gdrive sync` without `--once` is a
+  foreground watcher — handy for watching syncs happen live, but it stops
+  when you Ctrl-C it or the machine reboots. For a sync that runs on its
+  own and survives reboots, install the background service (below), or
+  run `--once` from a systemd timer.
 - **Retention**: `--keep N` (default 10) trims the vault to the newest N
   backups after each upload; `--keep 0` keeps everything. `gdrive backup
   --keep N` applies the same retention once per run.
@@ -300,17 +303,56 @@ OnCalendar=*-*-* 03:07:00
 Persistent=true
 ```
 
-**Turning sync off.** The watcher stops with Ctrl-C, and a scheduled run
-stops when its timer stops — but the tool also remembers whether it should
-*offer* continuous sync after a backup. If you'd rather it stop asking,
-turn it off:
+#### The background service
+
+For a sync that runs itself — no terminal, no timer — the tool can
+install the sync as a **per-vault background service**: it starts at
+login, restarts itself whenever it exits, and keeps going after reboots
+until you turn it off:
+
+```sh
+termius-backup gdrive sync on --name laptop     # install and start it
+termius-backup gdrive sync off --name laptop    # stop and remove it
+```
+
+Saying **Yes** to the post-backup offer does the same. The first "on"
+for a vault asks for the two passwords an unattended run needs — the
+Google Drive master password (unlocks the stored credentials) and the
+backup password (encrypts each upload) — and stores them in
+`~/.config/termius-secure-backup/sync-service-<vault>.json` with
+owner-only permissions; later "on" runs reuse that file without asking,
+and `gdrive sync off` removes it again. Instead of answering the prompts
+you can point at your own file with `--service-secrets <file>` (JSON:
+`{"master_password": "...", "backup_password": "..."}`).
+
+What it installs, per platform:
+
+- **Linux** — a systemd *user* unit,
+  `~/.config/systemd/user/termius-backup-sync-<vault>.service`
+  (`Restart=always`). Check it with
+  `systemctl --user status termius-backup-sync-<vault>` and
+  `journalctl --user -u termius-backup-sync-<vault>`. A systemd user
+  unit starts when you log in; to have it start at boot even without a
+  login, run `loginctl enable-linger <your-user>`.
+- **macOS** — a launchd LaunchAgent,
+  `~/Library/LaunchAgents/com.termius-secure-backup.sync-<vault>.plist`
+  (`KeepAlive`); its output goes to
+  `~/Library/Logs/termius-backup-sync-<vault>.log`.
+- **Windows** — a Task Scheduler task that runs at logon.
+
+**Turning sync off.** `gdrive sync off` stops and removes the vault's
+background service (every one of them, without `--name`), and also turns
+off the post-backup offer, so the tool stops suggesting continuous sync:
 
 ```sh
 termius-backup gdrive sync off                  # all vaults
 termius-backup gdrive sync off --name laptop    # just one vault
-termius-backup gdrive sync on                   # turn it back on
-termius-backup gdrive sync on --name laptop     # turn just one back on
+termius-backup gdrive sync on                   # re-enable the offer
+termius-backup gdrive sync on --name laptop     # install its service
 ```
+
+(`on` without `--name` only re-enables the offer — the service is
+per-vault, so only `on --name N` starts one.)
 
 With "off for all vaults" set, turning a single vault back on turns on
 **only that vault** — every other vault stays off.
@@ -320,10 +362,11 @@ the no-subcommand menu shows the current state and toggles it per vault
 or for all vaults, and the post-backup offer's *"No — and don't ask me
 again"* option turns it off for just that vault.
 
-Turning a vault off also forgets its recorded baseline, so the next
-explicit `gdrive sync` for it starts from the current tree. The switch
-only affects the post-backup offer — explicit `gdrive sync` runs (and a
-systemd timer) work regardless.
+Turning a vault off also forgets its recorded baseline — and deletes the
+default secrets file, so a later `gdrive sync on` asks for the two
+passwords again — so a fresh sync for that vault starts from the current
+tree. The switch does not affect explicit `gdrive sync` runs or a systemd
+timer: those work regardless.
 
 ### Google sign-in: nothing to set up
 

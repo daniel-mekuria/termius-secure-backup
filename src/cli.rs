@@ -35,6 +35,12 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub creds_file: Option<PathBuf>,
 
+    /// Read the Google Drive master password and the backup password from
+    /// this JSON file instead of prompting (for the continuous-sync
+    /// background service).
+    #[arg(long, global = true)]
+    pub service_secrets: Option<PathBuf>,
+
     /// Skip confirmation prompts and the weak-password gate (non-interactive).
     #[arg(long, short = 'y', global = true)]
     pub yes: bool,
@@ -54,6 +60,7 @@ pub struct Globals {
     pub password_file: Option<PathBuf>,
     pub password_env: Option<String>,
     pub creds_file: Option<PathBuf>,
+    pub service_secrets: Option<PathBuf>,
     pub yes: bool,
 }
 
@@ -67,6 +74,7 @@ impl Globals {
             password_file: cli.password_file,
             password_env: cli.password_env,
             creds_file: cli.creds_file,
+            service_secrets: cli.service_secrets,
             yes: cli.yes,
         }
     }
@@ -192,11 +200,14 @@ pub struct GdriveSyncArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum SyncCommand {
-    /// Turn the continuous sync off: stop suggesting it after backups and
-    /// forget the recorded baseline for the vault (or for all vaults
-    /// without `--name`). Explicit `gdrive sync` runs are not affected.
+    /// Turn the continuous sync off: stop the vault's background service,
+    /// stop suggesting it after backups, and forget the recorded baseline
+    /// (all of it for every vault without `--name`). Explicit `gdrive
+    /// sync` runs are not affected.
     Off(SyncToggleArgs),
-    /// Turn the continuous sync back on (re-enable the post-backup offer).
+    /// Turn the continuous sync back on: start the vault's background
+    /// service (it keeps syncing across reboots until turned off) and
+    /// re-enable the post-backup offer.
     On(SyncToggleArgs),
 }
 
