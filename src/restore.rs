@@ -103,12 +103,12 @@ pub fn run(opts: Options<'_>) -> Result<PathBuf> {
     // Unpack into a temp dir, verify, then swap into place.
     eprintln!("Unpacking …");
     let staging = tempfile::tempdir_in(dest.parent().unwrap_or(Path::new(".")))?;
-    let meta = archive::unpack(&payload, staging.path())?;
+    let (meta, manifest) = archive::unpack(&payload, staging.path())?;
     eprintln!(
         "Archive metadata: {} entries, {} bytes, created {}",
         meta.entry_count, meta.byte_size, meta.created_at
     );
-    if let Err(e) = archive::verify(staging.path(), &meta) {
+    if let Err(e) = archive::verify(staging.path(), &meta, &manifest) {
         return Err(Error::Integrity(format!(
             "decrypted archive failed integrity check before restore: {e}"
         )));

@@ -44,6 +44,24 @@ struct PackStats {
     entry_count: u64,
 }
 
+/// One entry of an archived tree, recorded by [`unpack`] as it is written
+/// to disk. The manifest is derived from the (AEAD-protected) tar itself,
+/// so it is authoritative for what the archive contained — [`verify`]
+/// uses it as a fallback when the recorded root hash was computed with a
+/// platform-dependent scheme by an older release.
+#[derive(Debug, Clone)]
+pub struct TarEntry {
+    /// Relative name with `/` separators.
+    pub name: String,
+    /// `b'd'` directory, `b'f'` file, `b'l'` symlink.
+    pub kind: u8,
+    /// File size in bytes (0 for directories and symlinks).
+    pub size: u64,
+    /// File: lowercase hex SHA-256 of the content. Symlink: link target.
+    /// Directory: empty.
+    pub digest: String,
+}
+
 /// Pack `root` (a directory) into a zstd-compressed tar held in `out`.
 /// `created_at` is an ISO-8601 timestamp string.
 ///
@@ -119,23 +137,30 @@ impl Read for TeeRead<'_> {
 /// content hash or a symlink's target; directories pass none — their
 /// children are hashed by the caller's recursion). This must stay in
 /// lockstep with what [`append_dir_recursive`] puts in the tar.
-fn hash_tree_entry(
-    hasher: &mut Sha256,
-    root: &Path,
-    path: &Path,
-    type_byte: u8,
-    len: u64,
-    payload: &[u8],
-) {
-    let rel = path
-        .strip_prefix(root)
-        .unwrap_or(path)
-        .display()
-        .to_string();
+///
+/// `rel` must be the path with `/` as separator: `Path::display()` uses
+/// the native separator (`\` on Windows), which would make the tree hash
+/// platform-dependent — a backup packed on Linux/macOS would never
+/// verify on Windows (and vice versa). Tar member names are already
+/// `/`-normalized by the tar crate, so this matches them.
+fn hash_tree_entry(hasher: &mut Sha256, rel: &str, type_byte: u8, len: u64, payload: &[u8]) {
     hasher.update(rel.as_bytes());
     hasher.update([type_byte]);
     hasher.update(len.to_le_bytes());
     hasher.update(payload);
+}
+
+/// The `sep`-separated form of `path` relative to `root` — the name fed
+/// into the tree hash (see [`hash_tree_entry`]). The canonical form uses
+/// `sep = '/'`.
+fn rel_name(root: &Path, path: &Path, sep: char) -> String {
+    let sep = sep.to_string();
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join(&sep)
 }
 
 /// Append a directory tree to the tar builder, preserving permissions,
@@ -187,12 +212,14 @@ fn append_dir_recursive(
             hdr.set_mtime(mtime);
             hdr.set_cksum();
             builder.append(&hdr, std::io::empty())?;
+            // A symlink's st_size is platform-dependent (POSIX reports the
+            // target length, Windows 0) — like directory sizes it is not
+            // part of the tree's identity, so hash it as 0.
             hash_tree_entry(
                 root_hasher,
-                root,
-                &path,
+                &rel_name(root, &path, '/'),
                 b'l',
-                meta.len(),
+                0,
                 target_lossy.as_bytes(),
             );
         } else if meta.is_dir() {
@@ -204,7 +231,10 @@ fn append_dir_recursive(
             hdr.set_mtime(mtime);
             hdr.set_cksum();
             builder.append(&hdr, std::io::empty())?;
-            hash_tree_entry(root_hasher, root, &path, b'd', meta.len(), &[]);
+            // Directory size is filesystem-dependent (ext4 reports a
+            // non-zero st_size, Windows always 0) — not part of the
+            // tree's identity, so hash it as 0.
+            hash_tree_entry(root_hasher, &rel_name(root, &path, '/'), b'd', 0, &[]);
             append_dir_recursive(builder, root, &path, root_hasher, stats)?;
         } else {
             let mut f = std::fs::File::open(&path)?;
@@ -223,8 +253,7 @@ fn append_dir_recursive(
             let digest = content_hash.finalize();
             hash_tree_entry(
                 root_hasher,
-                root,
-                &path,
+                &rel_name(root, &path, '/'),
                 b'f',
                 meta.len(),
                 util::hex::encode_lower_owned(&digest).as_bytes(),
@@ -255,10 +284,12 @@ fn perm_mode(meta: &std::fs::Metadata, is_dir: bool) -> u32 {
     }
 }
 
-/// Unpack an archive produced by [`pack`] into `dest`, returning the parsed
-/// metadata. `dest` is created if missing. Existing contents are NOT cleared
-/// by this function — callers manage overwrite semantics.
-pub fn unpack(data: &[u8], dest: &Path) -> Result<ArchiveMeta> {
+/// Unpack an archive produced by [`pack`] into `dest`, returning the
+/// parsed metadata and a per-entry manifest of everything that was
+/// written (see [`TarEntry`]). `dest` is created if missing. Existing
+/// contents are NOT cleared by this function — callers manage overwrite
+/// semantics.
+pub fn unpack(data: &[u8], dest: &Path) -> Result<(ArchiveMeta, Vec<TarEntry>)> {
     std::fs::create_dir_all(dest)?;
     let mut decoder = zstd::stream::Decoder::new(data)?;
     let mut tar_buf = Vec::new();
@@ -266,9 +297,12 @@ pub fn unpack(data: &[u8], dest: &Path) -> Result<ArchiveMeta> {
 
     let mut archive = tar::Archive::new(&tar_buf[..]);
     let mut meta: Option<ArchiveMeta> = None;
+    let mut manifest: Vec<TarEntry> = Vec::new();
     for entry in archive.entries()? {
         let mut entry = entry?;
-        let name = entry.path()?;
+        // Owned so the borrow on `entry` ends before the mutable
+        // `set_preserve_permissions`/`unpack_in` calls below.
+        let name = entry.path()?.to_path_buf();
         if name == std::path::Path::new(META_ENTRY_NAME) {
             let mut buf = Vec::new();
             entry.read_to_end(&mut buf)?;
@@ -278,12 +312,55 @@ pub fn unpack(data: &[u8], dest: &Path) -> Result<ArchiveMeta> {
         // Unpack entries relative to dest, preserving perms/symlinks.
         entry.set_preserve_permissions(true);
         entry.unpack_in(dest)?;
+        let et = entry.header().entry_type();
+        if et.is_file() {
+            // Hash what actually landed on disk (the AEAD-protected tar is
+            // the source of truth for the fallback check).
+            let digest = util::sha256_file(&dest.join(&name))?;
+            manifest.push(TarEntry {
+                name: slash_name(&name),
+                kind: b'f',
+                size: entry.header().size()?,
+                digest,
+            });
+        } else if et.is_dir() {
+            manifest.push(TarEntry {
+                name: slash_name(&name),
+                kind: b'd',
+                size: 0,
+                digest: String::new(),
+            });
+        } else if et.is_symlink() {
+            let target = entry
+                .link_name()?
+                .map(|t| t.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            manifest.push(TarEntry {
+                name: slash_name(&name),
+                kind: b'l',
+                size: 0,
+                digest: target,
+            });
+        }
+        // Other member types (hard links, char/block devices) are not
+        // produced by [`pack`]; if one appears, it is restored but not
+        // tracked by the manifest.
     }
     let meta = meta.ok_or_else(|| Error::BadFormat {
         detail: "archive is missing __meta.json".into(),
         offset: 0,
     })?;
-    Ok(meta)
+    Ok((meta, manifest))
+}
+
+/// The `/`-separated form of a path whose components are joined with the
+/// native separator (the tar crate converts member names to the native
+/// separator when unpacking off-Unix).
+fn slash_name(p: &Path) -> String {
+    p.components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// Compute a stable hash over a directory tree: a recursive Merkle-like
@@ -291,13 +368,13 @@ pub fn unpack(data: &[u8], dest: &Path) -> Result<ArchiveMeta> {
 /// mirrors [`hash_tree_entry`] exactly, so it matches the hash recorded at
 /// pack time. Sockets and fifos are skipped (a restored tree never contains
 /// them). Used to verify round-trips.
-fn tree_hash(root: &Path) -> Result<String> {
+fn tree_hash(root: &Path, sep: char) -> Result<String> {
     let mut hasher = Sha256::new();
-    tree_hash_into(root, root, &mut hasher)?;
+    tree_hash_into(root, root, &mut hasher, sep)?;
     Ok(util::hex::encode_lower_owned(&hasher.finalize()))
 }
 
-fn tree_hash_into(root: &Path, current: &Path, hasher: &mut Sha256) -> Result<()> {
+fn tree_hash_into(root: &Path, current: &Path, hasher: &mut Sha256, sep: char) -> Result<()> {
     let mut entries: Vec<std::fs::DirEntry> =
         std::fs::read_dir(current)?.collect::<std::result::Result<_, _>>()?;
     entries.sort_by_key(|e| e.file_name());
@@ -305,19 +382,28 @@ fn tree_hash_into(root: &Path, current: &Path, hasher: &mut Sha256) -> Result<()
         let path = entry.path();
         let meta = std::fs::symlink_metadata(&path)?;
         if meta.is_dir() {
-            hash_tree_entry(hasher, root, &path, b'd', meta.len(), &[]);
-            tree_hash_into(root, &path, hasher)?;
+            // Directory size is filesystem-dependent — hashed as 0 (see
+            // the matching comment in [`append_dir_recursive`]).
+            hash_tree_entry(hasher, &rel_name(root, &path, sep), b'd', 0, &[]);
+            tree_hash_into(root, &path, hasher, sep)?;
         } else if meta.is_file() {
             let h = util::sha256_file(&path)?;
-            hash_tree_entry(hasher, root, &path, b'f', meta.len(), h.as_bytes());
-        } else if meta.is_symlink() {
-            let t = std::fs::read_link(&path)?;
             hash_tree_entry(
                 hasher,
-                root,
-                &path,
-                b'l',
+                &rel_name(root, &path, sep),
+                b'f',
                 meta.len(),
+                h.as_bytes(),
+            );
+        } else if meta.is_symlink() {
+            let t = std::fs::read_link(&path)?;
+            // Symlink st_size is platform-dependent — hashed as 0 (see the
+            // matching comment in [`append_dir_recursive`]).
+            hash_tree_entry(
+                hasher,
+                &rel_name(root, &path, sep),
+                b'l',
+                0,
                 t.to_string_lossy().as_bytes(),
             );
         }
@@ -328,15 +414,153 @@ fn tree_hash_into(root: &Path, current: &Path, hasher: &mut Sha256) -> Result<()
 
 /// Verify that a directory tree matches the recorded metadata (used after
 /// restore). Returns Ok(()) if the root hash matches.
-pub fn verify(dest: &Path, meta: &ArchiveMeta) -> Result<()> {
-    let actual = tree_hash(dest)?;
-    if !util::ct_eq(actual.as_bytes(), meta.sha256_root.as_bytes()) {
-        return Err(Error::Integrity(format!(
-            "restored tree hash mismatch: expected {}, got {}",
+pub fn verify(dest: &Path, meta: &ArchiveMeta, manifest: &[TarEntry]) -> Result<()> {
+    let actual = tree_hash(dest, '/')?;
+    if util::ct_eq(actual.as_bytes(), meta.sha256_root.as_bytes()) {
+        return Ok(());
+    }
+    // A release before slash-normalization recorded the native separator
+    // in the hash (on Windows, `\`). Re-check with it so such a backup
+    // still verifies on the platform it was packed on.
+    let native = std::path::MAIN_SEPARATOR;
+    if native != '/' {
+        let legacy = tree_hash(dest, native)?;
+        if util::ct_eq(legacy.as_bytes(), meta.sha256_root.as_bytes()) {
+            return Ok(());
+        }
+    }
+    // The recorded root hash came from a release whose scheme embedded
+    // platform-specific details (ext4 directory `st_size`, …). The tree
+    // may still be intact — compare it entry-by-entry against the
+    // manifest the unpack recorded from the AEAD-protected tar.
+    verify_against_manifest(dest, manifest).map_err(|e| {
+        Error::Integrity(format!(
+            "restored tree does not match the archive: expected root hash {}, got {}, and per-entry check found: {e}",
             meta.sha256_root, actual
+        ))
+    })
+}
+
+/// Compare the tree under `dest` against the per-entry manifest recorded
+/// by [`unpack`]. Every manifest entry must exist on disk with the same
+/// type; files must match in size and content hash, symlinks in target,
+/// directories are matched by name alone. Any entry on disk that is not
+/// in the manifest is a failure (a restore stages into an empty dir).
+fn verify_against_manifest(dest: &Path, manifest: &[TarEntry]) -> Result<()> {
+    let mut expected: std::collections::BTreeMap<&str, &TarEntry> =
+        std::collections::BTreeMap::new();
+    for e in manifest {
+        if expected.insert(e.name.as_str(), e).is_some() {
+            return Err(Error::Integrity(format!(
+                "archive lists entry {} more than once",
+                e.name
+            )));
+        }
+    }
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    walk_against_manifest(dest, dest, &mut expected, &mut seen)?;
+    let missing: Vec<&str> = expected
+        .keys()
+        .copied()
+        .filter(|n| !seen.contains(*n))
+        .collect();
+    if !missing.is_empty() {
+        return Err(Error::Integrity(format!(
+            "entries missing from restored tree: {}",
+            missing.join(", ")
         )));
     }
     Ok(())
+}
+
+fn walk_against_manifest(
+    root: &Path,
+    current: &Path,
+    expected: &mut std::collections::BTreeMap<&str, &TarEntry>,
+    seen: &mut std::collections::BTreeSet<String>,
+) -> Result<()> {
+    let mut entries: Vec<std::fs::DirEntry> =
+        std::fs::read_dir(current)?.collect::<std::result::Result<_, _>>()?;
+    entries.sort_by_key(|e| e.file_name());
+    for entry in entries {
+        let path = entry.path();
+        let meta = std::fs::symlink_metadata(&path)?;
+        let name = rel_name(root, &path, '/');
+        let exp = expected.remove(name.as_str()).ok_or_else(|| {
+            Error::Integrity(format!("unexpected entry in restored tree: {name}"))
+        })?;
+        seen.insert(name);
+        if meta.is_dir() {
+            if exp.kind != b'd' {
+                return Err(Error::Integrity(format!(
+                    "entry {}: archive has a {}, tree has a directory",
+                    path.display(),
+                    kind_name(exp.kind)
+                )));
+            }
+            walk_against_manifest(root, &path, expected, seen)?;
+        } else if meta.is_file() {
+            if exp.kind != b'f' {
+                return Err(Error::Integrity(format!(
+                    "entry {}: archive has a {}, tree has a file",
+                    path.display(),
+                    kind_name(exp.kind)
+                )));
+            }
+            if meta.len() != exp.size {
+                return Err(Error::Integrity(format!(
+                    "entry {}: size {} does not match archive size {}",
+                    path.display(),
+                    meta.len(),
+                    exp.size
+                )));
+            }
+            let h = util::sha256_file(&path)?;
+            if !util::ct_eq(h.as_bytes(), exp.digest.as_bytes()) {
+                return Err(Error::Integrity(format!(
+                    "entry {}: content hash {} does not match archive hash {}",
+                    path.display(),
+                    h,
+                    exp.digest
+                )));
+            }
+        } else if meta.is_symlink() {
+            if exp.kind != b'l' {
+                return Err(Error::Integrity(format!(
+                    "entry {}: archive has a {}, tree has a symlink",
+                    path.display(),
+                    kind_name(exp.kind)
+                )));
+            }
+            let t = std::fs::read_link(&path)?;
+            if t.to_string_lossy() != exp.digest {
+                return Err(Error::Integrity(format!(
+                    "entry {}: symlink target {} does not match archive target {}",
+                    path.display(),
+                    t.display(),
+                    exp.digest
+                )));
+            }
+        } else {
+            // Sockets, fifos: cannot come from the tar, so they are not
+            // tracked by the manifest.
+            return Err(Error::Integrity(format!(
+                "entry {}: unsupported file type in restored tree",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// `b'd'`/`b'f'`/`b'l'` as a word, for error messages.
+fn kind_name(kind: u8) -> &'static str {
+    match kind {
+        b'd' => "directory",
+        b'f' => "file",
+        b'l' => "symlink",
+        _ => "unknown entry",
+    }
 }
 
 #[cfg(test)]
@@ -369,9 +593,9 @@ mod tests {
         assert!(meta.entry_count > 0);
 
         let dest = tempfile::tempdir().unwrap();
-        let got = unpack(&buf, dest.path()).unwrap();
+        let (got, manifest) = unpack(&buf, dest.path()).unwrap();
         assert_eq!(got.sha256_root, meta.sha256_root);
-        verify(dest.path(), &got).unwrap();
+        verify(dest.path(), &got, &manifest).unwrap();
 
         // contents
         let txt = fs::read_to_string(dest.path().join("hello.txt")).unwrap();
@@ -386,8 +610,8 @@ mod tests {
         let mut buf = Vec::new();
         let meta = pack(src.path(), &mut buf, "2026-01-01T00:00:00Z").unwrap();
         let dest = tempfile::tempdir().unwrap();
-        let got = unpack(&buf, dest.path()).unwrap();
-        verify(dest.path(), &got).unwrap();
+        let (got, manifest) = unpack(&buf, dest.path()).unwrap();
+        verify(dest.path(), &got, &manifest).unwrap();
         assert_eq!(got.sha256_root, meta.sha256_root);
     }
 
@@ -433,9 +657,43 @@ mod tests {
         let mut buf = Vec::new();
         let meta = pack(src.path(), &mut buf, "t").unwrap();
         let dest = tempfile::tempdir().unwrap();
-        unpack(&buf, dest.path()).unwrap();
+        let (_, manifest) = unpack(&buf, dest.path()).unwrap();
         fs::write(dest.path().join("f"), b"tampered").unwrap();
-        assert!(verify(dest.path(), &meta).is_err());
+        assert!(verify(dest.path(), &meta, &manifest).is_err());
+    }
+
+    /// A backup packed by an older release whose recorded root hash
+    /// embedded platform-specific details (e.g. ext4 directory `st_size`)
+    /// cannot match on any platform — but the tree is intact, and the
+    /// per-entry manifest check (derived from the AEAD-protected tar)
+    /// must accept it.
+    #[test]
+    fn verify_falls_back_to_manifest_for_legacy_root_hash() {
+        let src = tempfile::tempdir().unwrap();
+        make_tree(src.path());
+        let mut buf = Vec::new();
+        pack(src.path(), &mut buf, "t").unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        let (mut got, manifest) = unpack(&buf, dest.path()).unwrap();
+        // Simulate the older release's hash: non-empty, but unmatchable.
+        got.sha256_root = "0".repeat(64);
+        verify(dest.path(), &got, &manifest).unwrap();
+    }
+
+    /// The fallback must still catch real damage: a tree whose root hash
+    /// mismatches AND whose entries diverge from the manifest fails.
+    #[test]
+    fn verify_fallback_rejects_tampered_tree() {
+        let src = tempfile::tempdir().unwrap();
+        make_tree(src.path());
+        let mut buf = Vec::new();
+        pack(src.path(), &mut buf, "t").unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        let (got, manifest) = unpack(&buf, dest.path()).unwrap();
+        fs::write(dest.path().join("hello.txt"), b"tampered").unwrap();
+        let mut legacy = got.clone();
+        legacy.sha256_root = "0".repeat(64);
+        assert!(verify(dest.path(), &legacy, &manifest).is_err());
     }
 
     /// A tree containing a Unix-domain socket (which the tar format cannot
@@ -461,9 +719,9 @@ mod tests {
         assert_eq!(meta.byte_size, 12);
 
         let dest = tempfile::tempdir().unwrap();
-        let got = unpack(&buf, dest.path()).unwrap();
+        let (got, manifest) = unpack(&buf, dest.path()).unwrap();
         assert_eq!(got.sha256_root, meta.sha256_root);
-        verify(dest.path(), &got).unwrap();
+        verify(dest.path(), &got, &manifest).unwrap();
         // The socket was not (and cannot be) restored.
         assert!(!dest.path().join("sock").exists());
     }

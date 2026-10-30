@@ -19,9 +19,12 @@
 //! the sync needs: the Google Drive master password (unlocks the stored
 //! credentials) and the backup password (encrypts the uploads).
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(not(target_os = "windows"))]
+use std::path::PathBuf;
 
 use crate::error::{Error, Result};
+#[cfg(not(target_os = "windows"))]
 use crate::paths;
 
 /// Unit/label/task names only accept a limited character set, so anything
@@ -106,7 +109,10 @@ pub fn service_id(vault: &str) -> String {
     format!("{ID_PREFIX}{}", service_slug(vault))
 }
 
-/// The service file location for `vault` on this platform, if any.
+/// The service file location for `vault` on this platform, if any. On
+/// Windows the task lives in the registry (no file), so the function is
+/// not defined there.
+#[cfg(not(target_os = "windows"))]
 fn service_file(vault: &str) -> Option<PathBuf> {
     #[cfg(target_os = "linux")]
     {
@@ -127,12 +133,7 @@ fn service_file(vault: &str) -> Option<PathBuf> {
                 .join(format!("{}.plist", service_id(vault))),
         )
     }
-    #[cfg(target_os = "windows")]
-    {
-        let _ = vault;
-        None // Task Scheduler keeps the task in the registry.
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = vault;
         None
@@ -143,11 +144,11 @@ fn service_file(vault: &str) -> Option<PathBuf> {
 pub fn service_installed(vault: &str) -> bool {
     #[cfg(target_os = "windows")]
     {
-        return std::process::Command::new("schtasks")
+        std::process::Command::new("schtasks")
             .args(["/Query", "/TN", &service_id(vault)])
             .output()
             .map(|o| o.status.success())
-            .unwrap_or(false);
+            .unwrap_or(false)
     }
     #[cfg(not(target_os = "windows"))]
     service_file(vault).is_some_and(|p| p.symlink_metadata().is_ok())
@@ -201,10 +202,12 @@ pub fn installed_vaults() -> Vec<String> {
     #[cfg(target_os = "windows")]
     {
         // Task Scheduler: enumerate and filter by our task-name prefix.
-        let out = std::process::Command::new("schtasks")
+        let Ok(out) = std::process::Command::new("schtasks")
             .args(["/Query", "/FO", "CSV", "/NH"])
             .output()
-            .ok()?;
+        else {
+            return Vec::new();
+        };
         let text = String::from_utf8_lossy(&out.stdout);
         let prefix = "termius-backup-sync-";
         let mut found = Vec::new();
@@ -221,7 +224,7 @@ pub fn installed_vaults() -> Vec<String> {
                 }
             }
         }
-        return found;
+        found
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -562,6 +565,10 @@ fn remove_windows(vault: &str) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The parent's `PathBuf` import is Windows-gated; the tests use it
+    // on every platform.
+    #[cfg(target_os = "windows")]
+    use std::path::PathBuf;
 
     #[test]
     fn slug_sanitizes_vault_names() {

@@ -19,7 +19,9 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
-use crate::{paths, prompt};
+#[cfg(unix)]
+use crate::paths;
+use crate::prompt;
 
 /// Put the currently running binary on the PATH.
 pub fn run(yes: bool) -> Result<()> {
@@ -93,6 +95,7 @@ fn find_in_path(path_var: Option<&OsStr>, name: &OsStr) -> Option<PathBuf> {
 }
 
 /// The basename of `$SHELL` ("" when unset) — which rc file to update.
+#[cfg(unix)]
 fn shell_name() -> String {
     std::env::var("SHELL")
         .ok()
@@ -107,6 +110,7 @@ fn shell_name() -> String {
 /// The shell rc file to update for a shell named `shell` (its basename).
 /// fish keeps its config elsewhere; unknown or missing shells get
 /// `~/.profile`, which sh and login bash read.
+#[cfg(unix)]
 fn rc_file_for(shell: &str, home: &Path) -> PathBuf {
     if shell.contains("fish") {
         home.join(".config").join("fish").join("config.fish")
@@ -382,6 +386,7 @@ mod tests {
         assert_eq!(find_in_path(None, OsStr::new("termius-backup")), None);
     }
 
+    #[cfg(unix)]
     #[test]
     fn rc_file_follows_shell() {
         let home = PathBuf::from("/home/u");

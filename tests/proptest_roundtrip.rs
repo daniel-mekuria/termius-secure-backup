@@ -100,8 +100,8 @@ proptest! {
         )
         .unwrap();
         let dest = tempfile::tempdir().unwrap();
-        let got = archive::unpack(&buf, dest.path()).unwrap();
-        archive::verify(dest.path(), &got).unwrap();
+        let (got, manifest) = archive::unpack(&buf, dest.path()).unwrap();
+        archive::verify(dest.path(), &got, &manifest).unwrap();
         prop_assert_eq!(got.sha256_root, meta.sha256_root);
     }
 }

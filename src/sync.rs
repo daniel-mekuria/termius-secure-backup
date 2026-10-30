@@ -1253,7 +1253,7 @@ mod tests {
         std::fs::write(file.path(), &tsb).unwrap();
         let payload = container::read_and_decrypt(file.path(), b"test-password").unwrap();
         let dest = tempfile::tempdir().unwrap();
-        let meta = archive::unpack(&payload, dest.path()).unwrap();
+        let (meta, _) = archive::unpack(&payload, dest.path()).unwrap();
         assert_eq!(
             std::fs::read_to_string(dest.path().join("hello.txt")).unwrap(),
             "hello"

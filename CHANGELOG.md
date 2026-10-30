@@ -44,6 +44,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   binary is already reachable from the PATH reports that and changes
   nothing.
 
+### Fixed
+- Building and running on Windows: Unix-only code in the `install` and
+  sync-service paths was not properly `#[cfg]`-gated, so the Windows target
+  failed to compile (and clippy flagged dead code). `termius-backup` now
+  builds, lints clean, and passes the full test suite on Windows.
+- Restoring a backup made on another platform: the tree-hash used for the
+  post-decrypt integrity check embedded platform-specific details (native
+  path separators, and directory/symlink `st_size` values, e.g. ext4's
+  non-zero directory sizes), so a valid backup packed on Linux failed
+  verification on Windows with a spurious "restored tree hash mismatch".
+  The hash now uses `/`-separated paths and hashes directory/symlink sizes
+  as 0 — stable across platforms. For backups made by older releases,
+  `restore` additionally falls back to verifying the restored tree
+  entry-by-entry against the archive's own (AEAD-protected) tar, so such
+  backups restore cleanly on any platform.
+
 ## [0.3.1] - 2026-08-31
 
 ### Added
