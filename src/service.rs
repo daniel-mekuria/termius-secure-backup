@@ -401,9 +401,9 @@ fn xml_escape(s: &str) -> String {
 #[cfg(target_os = "macos")]
 fn plist_content(exe: &Path, vault: &str, secrets: &Path, log: &Path) -> String {
     let label = service_id(vault);
-    let mut args: Vec<&std::ffi::OsStr> = vec![exe.as_os_str()];
+    let mut args: Vec<std::ffi::OsString> = vec![exe.as_os_str().to_os_string()];
     for a in service_args(vault, secrets) {
-        args.push(Path::new(&a).as_os_str());
+        args.push(Path::new(&a).as_os_str().to_os_string());
     }
     let items: Vec<String> = args
         .iter()

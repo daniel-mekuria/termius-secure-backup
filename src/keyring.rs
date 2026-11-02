@@ -297,10 +297,9 @@ mod backend {
         if st.success() {
             Ok(())
         } else {
-            Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("security add-generic-password exited with {st}"),
-            ))
+            Err(io::Error::other(format!(
+                "security add-generic-password exited with {st}"
+            )))
         }
     }
 }
@@ -343,19 +342,19 @@ mod backend {
             .stdin(std::process::Stdio::piped())
             .spawn()?;
         {
-            let stdin = child.stdin.as_mut().ok_or_else(|| {
-                io::Error::new(io::ErrorKind::Other, "could not open secret-tool stdin")
-            })?;
+            let stdin = child
+                .stdin
+                .as_mut()
+                .ok_or_else(|| io::Error::other("could not open secret-tool stdin"))?;
             stdin.write_all(key_b64.as_bytes())?;
         }
         let st = child.wait()?;
         if st.success() {
             Ok(())
         } else {
-            Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("secret-tool store exited with {st}"),
-            ))
+            Err(io::Error::other(format!(
+                "secret-tool store exited with {st}"
+            )))
         }
     }
 }
