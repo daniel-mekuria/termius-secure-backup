@@ -57,12 +57,17 @@ do that for you.
 | Windows | `%APPDATA%\Termius` (`C:\Users\<you>\AppData\Roaming\Termius`) |
 | Linux   | `~/.config/Termius`                                     |
 
-> **Keychain limitation.** Termius stores the IndexedDB *encryption key* in
-> the OS keychain, **not** in the `userData` directory. A `.tsb` backup
-> faithfully restores the on-disk data. On the **same machine** this is
-> sufficient (the keychain still holds the key). Migrating to a **new
-> machine** may require re-authenticating in Termius so it re-syncs from
-> its cloud vault. See [SECURITY.md](SECURITY.md) for the full threat model.
+> **The encryption key lives in the OS keyring, and the backup carries it.**
+> Termius stores the IndexedDB *encryption key* (`localKey`) in the OS
+> keyring (Windows Credential Manager, the macOS Keychain, or the freedesktop
+> Secret Service on Linux) — **not** in the `userData` directory. To make
+> cross-machine restores work, a backup reads that key and stores it *inside*
+> the encrypted `.tsb` (next to the data it protects); a restore installs it
+> into the target machine's keyring before swapping in the data, so restored
+> hosts and SSH keys decrypt on any machine, not just the source. Only the
+> Termius-namespaced keyring entry is ever read or written. Pass
+> `--no-carry-key` to skip this (e.g. to restore data whose key you already
+> have). See [SECURITY.md](SECURITY.md) for the full threat model.
 
 ---
 
@@ -132,8 +137,15 @@ termius-backup info ~/backups/termius-2026.tsb
 termius-backup restore ~/backups/termius-2026.tsb
 # → prints a summary and asks for confirmation
 # → snapshots the current Termius dir to a tagged, unencrypted snapshot
-# → asks for the password, decrypts, and restores
+# → asks for the password, decrypts, and verifies the archive
+# → installs the backup's carried Termius keyring key (if any) into the
+#   OS keyring, so restored hosts/keys decrypt on this machine
+# → replaces the Termius dir with the restored data
 ```
+
+A backup made by an older version (before key carrying) has no carried key;
+restoring it works as before, and on a different machine the restored data
+only decrypts where that source machine's key is already in the keyring.
 
 ### Roll back
 

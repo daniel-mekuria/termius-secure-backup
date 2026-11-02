@@ -8,6 +8,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Cross-machine restore now works: the `localKey` is carried in the
+  archive.** Termius encrypts every host/key field with a 32-byte
+  `localKey` it keeps in the OS keyring (Windows Credential Manager,
+  the freedesktop Secret Service, or the macOS Keychain), *outside* the
+  data directory — so a backup restored on another machine showed
+  empty rows. Backups (`backup`, `gdrive backup`, and every continuous
+  sync upload) now read that key from the source machine's keyring and
+  store it inside the encrypted archive (a `local_key` field in the
+  `__meta.json` entry, protected by the same Argon2id +
+  XChaCha20-Poly1305 envelope as the data). Restores (`restore`,
+  `gdrive restore`) install the carried key into the target keyring
+  (overwriting any existing `Termius`/`termius` entry, creating
+  `Termius` on a fresh machine) before swapping in the data, so the
+  restored hosts and keys decrypt on any platform. Only the
+  Termius-namespaced keyring entry is ever read or written. Best-effort
+  at pack time (no keyring entry, or one that can't be read, just means
+  the archive carries no key and restore works as before on the same
+  machine); at restore time a failed install aborts before the data is
+  replaced, with a message. Opt out with the new global
+  `--no-carry-key` flag (skip reading the key on backup, skip installing
+  it on restore).
 - Continuous sync now runs as a **background service** that keeps going
   after the terminal closes and after reboots, until explicitly turned
   off. Accepting the post-backup offer, or `gdrive sync on --name N`

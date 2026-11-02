@@ -1298,6 +1298,8 @@ pub struct BackupOptions<'a> {
     pub yes: bool,
     /// Keep only the newest N backups in the vault (0 = keep all).
     pub keep: u32,
+    /// Carry Termius's OS-keyring `localKey` into the archive (best-effort).
+    pub carry_key: bool,
 }
 
 /// Run a Google Drive backup. Returns `(vault_name, drive_file_id)`.
@@ -1325,8 +1327,14 @@ pub fn run_backup(opts: BackupOptions<'_>) -> Result<(String, String)> {
     let password = backup::acquire_password(opts.password_file, opts.password_env, true, opts.yes)?;
 
     eprintln!("Packing {} …", src.display());
+    let carried = backup::carried_key_or_warn(opts.carry_key);
     let mut payload = Vec::new();
-    let meta = archive::pack(&src, &mut payload, &util::local_timestamp_string(&now))?;
+    let meta = archive::pack(
+        &src,
+        &mut payload,
+        &util::local_timestamp_string(&now),
+        carried.as_ref(),
+    )?;
     eprintln!(
         "Packed {} entries ({} bytes).",
         meta.entry_count, meta.byte_size
@@ -1365,6 +1373,9 @@ pub struct RestoreOptions<'a> {
     pub password_env: Option<&'a str>,
     pub creds_path: &'a Path,
     pub yes: bool,
+    /// Install the archive's carried Termius `localKey` into the OS
+    /// keyring (default; see [`restore::install_carried_key`]).
+    pub carry_key: bool,
 }
 
 /// Run a Google Drive restore: list vaults → pick → list backups → pick →
@@ -1513,6 +1524,7 @@ pub fn run_restore(opts: RestoreOptions<'_>) -> Result<PathBuf> {
             "decrypted archive failed integrity check before restore: {e}"
         )));
     }
+    restore::install_carried_key(&meta, opts.carry_key)?;
     restore::replace_dir(&dest, staging.path())?;
     eprintln!("Restore complete: {}", dest.display());
     Ok(dest)
@@ -1658,7 +1670,7 @@ mod tests {
         let src = tempfile::tempdir().unwrap();
         std::fs::write(src.path().join("hosts.json"), b"[{\"name\":\"a\"}]").unwrap();
         let mut payload = Vec::new();
-        let _meta = archive::pack(src.path(), &mut payload, "2026-01-01T00:00:00Z").unwrap();
+        let _meta = archive::pack(src.path(), &mut payload, "2026-01-01T00:00:00Z", None).unwrap();
         let tsb = tsb_file(&payload, "backup-pw-9");
 
         let mut m = MockGdriveClient::new();

@@ -14,6 +14,7 @@ pub mod crypto;
 pub mod error;
 pub mod gdrive;
 pub mod install;
+pub mod keyring;
 pub mod paths;
 pub mod prompt;
 pub mod restore;

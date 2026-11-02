@@ -45,6 +45,12 @@ pub struct Cli {
     #[arg(long, short = 'y', global = true)]
     pub yes: bool,
 
+    /// Do not carry Termius's OS-keyring `localKey`: backups skip reading
+    /// it, restores skip installing a carried one. Without the carried key,
+    /// restored hosts/keys only decrypt on machines that already hold it.
+    #[arg(long, global = true)]
+    pub no_carry_key: bool,
+
     /// Verbose logging.
     #[arg(long, short = 'v', global = true)]
     pub verbose: bool,
@@ -62,6 +68,9 @@ pub struct Globals {
     pub creds_file: Option<PathBuf>,
     pub service_secrets: Option<PathBuf>,
     pub yes: bool,
+    /// Inverse of `--no-carry-key` (true = carry the Termius keyring key,
+    /// the default).
+    pub carry_key: bool,
 }
 
 impl Globals {
@@ -76,6 +85,7 @@ impl Globals {
             creds_file: cli.creds_file,
             service_secrets: cli.service_secrets,
             yes: cli.yes,
+            carry_key: !cli.no_carry_key,
         }
     }
 }

@@ -31,6 +31,7 @@ fn main() -> ExitCode {
         creds_file,
         service_secrets,
         yes,
+        carry_key,
     } = globals;
     let g = Refs {
         termius_dir,
@@ -40,6 +41,7 @@ fn main() -> ExitCode {
         creds_file,
         service_secrets,
         yes,
+        carry_key,
     };
     let result = (|| -> termius_secure_backup::error::Result<()> {
         // `--service-secrets` feeds both passwords to the run through
@@ -79,6 +81,7 @@ struct Refs {
     creds_file: Option<std::path::PathBuf>,
     service_secrets: Option<std::path::PathBuf>,
     yes: bool,
+    carry_key: bool,
 }
 
 impl Refs {
@@ -118,6 +121,7 @@ fn run_wizard(g: &Refs) -> termius_secure_backup::error::Result<()> {
         creds_file: g.creds_file(),
         service_secrets: g.service_secrets(),
         yes: g.yes,
+        carry_key: g.carry_key,
     })
 }
 
@@ -131,6 +135,7 @@ fn run_backup(
         password_file: g.password_file(),
         password_env: g.password_env(),
         yes: g.yes,
+        carry_key: g.carry_key,
         kdf: crypto::KdfParams::default(),
     };
     let p = backup::run(opts)?;
@@ -149,6 +154,7 @@ fn run_restore(
         password_file: g.password_file(),
         password_env: g.password_env(),
         yes: g.yes,
+        carry_key: g.carry_key,
     };
     let p = restore::run(opts)?;
     eprintln!("Done: restored into {}", p.display());
@@ -228,6 +234,7 @@ fn run_gdrive(g: &Refs, action: GdriveAction) -> termius_secure_backup::error::R
                 creds_path: &creds,
                 yes: g.yes,
                 keep: a.keep,
+                carry_key: g.carry_key,
             })?;
             eprintln!("Done: backup in vault '{vault}' (Drive file {file_id})");
             sync::offer_after_backup(g.termius_dir(), &ctx, &vault);
@@ -240,6 +247,7 @@ fn run_gdrive(g: &Refs, action: GdriveAction) -> termius_secure_backup::error::R
                 password_env: g.password_env(),
                 creds_path: &creds,
                 yes: g.yes,
+                carry_key: g.carry_key,
             })?;
             eprintln!("Done: restored into {}", p.display());
         }
@@ -310,6 +318,7 @@ fn run_gdrive(g: &Refs, action: GdriveAction) -> termius_secure_backup::error::R
                     password_env: g.password_env(),
                     creds_path: &creds,
                     yes: g.yes,
+                    carry_key: g.carry_key,
                     interval: a.interval,
                     keep: a.keep,
                     once: a.once,

@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use crate::archive;
 use crate::container;
 use crate::error::{Error, Result};
+use crate::keyring;
 use crate::paths;
 use crate::prompt;
 use crate::snapshot::{self, Reason};
@@ -20,6 +21,10 @@ pub struct Options<'a> {
     pub password_file: Option<&'a Path>,
     pub password_env: Option<&'a str>,
     pub yes: bool,
+    /// Install the archive's carried Termius `localKey` into the OS
+    /// keyring (default). Disable to skip — the data still restores,
+    /// but hosts/keys only decrypt where that key already exists.
+    pub carry_key: bool,
 }
 
 /// Run a restore. Returns the path that was restored into.
@@ -114,10 +119,52 @@ pub fn run(opts: Options<'_>) -> Result<PathBuf> {
         )));
     }
 
+    // Install the carried Termius keyring key so the restored data
+    // decrypts on this machine. Done before the swap, so a failure
+    // aborts with the live directory still untouched.
+    install_carried_key(&meta, opts.carry_key)?;
+
     // Replace the live directory with the staged tree.
     replace_dir(&dest, staging.path())?;
     eprintln!("Restore complete: {}", dest.display());
     Ok(dest)
+}
+
+/// Install the carried Termius keyring key, if the archive has one and
+/// key carrying is enabled. No-ops (with a note) when the archive has no
+/// carried key or carrying is disabled; errors only when a carried key
+/// exists, the install was requested, and it failed. `pub(crate)` so the
+/// Google Drive restore flow can reuse it.
+pub(crate) fn install_carried_key(meta: &crate::archive::ArchiveMeta, carry: bool) -> Result<()> {
+    match meta.local_key.as_ref() {
+        Some(k) if carry => {
+            eprintln!(
+                "Installing carried Termius localKey ({}) into the OS keyring …",
+                k.describe()
+            );
+            keyring::install_local_key(&k.key_b64)
+                .map(|what| eprintln!("{what}"))
+                .map_err(|e| {
+                    Error::Other(format!(
+                        "the archive carries a Termius localKey, but it could not \
+                         be installed into the OS keyring: {e}\n\
+                         Aborting before the restore — the current Termius \
+                         directory was not modified. Fix keyring access and \
+                         retry (or use --no-carry-key to restore the data \
+                         without installing the key)."
+                    ))
+                })
+        }
+        Some(_) => {
+            eprintln!(
+                "note: the archive carries a Termius localKey but --no-carry-key \
+                 is set, so it was not installed — restored hosts/keys may \
+                 appear empty if this machine's Termius uses a different key."
+            );
+            Ok(())
+        }
+        None => Ok(()),
+    }
 }
 
 /// Atomically replace `dest` with the contents of `staging` by renaming.

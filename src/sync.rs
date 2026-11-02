@@ -526,6 +526,8 @@ pub struct SyncOptions<'a> {
     pub password_env: Option<&'a str>,
     pub creds_path: &'a Path,
     pub yes: bool,
+    /// Carry Termius's OS-keyring `localKey` into each upload (best-effort).
+    pub carry_key: bool,
     /// Check interval in seconds (clamped to a 5-second minimum).
     pub interval: u64,
     /// Keep only the newest N backups in the vault (0 = keep all).
@@ -711,8 +713,16 @@ fn do_upload(
 ) -> Result<bool> {
     let opts = ctx.opts;
     eprintln!("Changes detected — packing {} …", ctx.src.display());
+    // Best-effort per upload: the keyring rarely changes, but reading it
+    // here keeps every upload self-contained.
+    let carried = backup::carried_key_or_warn(opts.carry_key);
     let mut payload = Vec::new();
-    let meta = archive::pack(ctx.src, &mut payload, &util::local_timestamp_string(&now))?;
+    let meta = archive::pack(
+        ctx.src,
+        &mut payload,
+        &util::local_timestamp_string(&now),
+        carried.as_ref(),
+    )?;
 
     // Torn-write guard: if the tree changed while we packed, the archive
     // may straddle two states — skip this window; the next tick picks up
@@ -1219,6 +1229,7 @@ mod tests {
             password_env: None,
             creds_path: Path::new("/nonexistent-creds"),
             yes: true,
+            carry_key: false,
             interval: 60,
             keep: 0,
             once: false,
@@ -1297,6 +1308,7 @@ mod tests {
                 password_env: None,
                 creds_path: Path::new("/nonexistent-creds"),
                 yes: true,
+                carry_key: false,
                 interval: 60,
                 keep: 0,
                 once: false,

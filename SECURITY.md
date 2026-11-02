@@ -32,12 +32,16 @@ offline attacker who has a copy of the file but **not** the password.
   rollback snapshots it produces are also stored **unencrypted**, because
   they are only ever copies of data that already lives on disk in the
   clear. Treat your local disk as trusted.
-- Termius stores the IndexedDB encryption key in the **OS keychain**
-  (macOS Keychain / Windows Credential Manager / libsecret), *not* in the
-  `userData` directory. A `.tsb` backup faithfully restores the on-disk
-  data; on the **same machine** this is sufficient. Migrating to a new
-  machine may require re-authenticating so Termius re-syncs from its cloud
-  vault. Exporting the keychain entry is a planned future enhancement.
+- Termius stores the IndexedDB encryption key (`localKey`) in the **OS
+  keyring** (macOS Keychain / Windows Credential Manager / the freedesktop
+  Secret Service), *not* in the `userData` directory. A backup reads that
+  key from the source keyring and carries it inside the encrypted `.tsb`;
+  a restore installs it into the target keyring before swapping in the
+  data, so restored hosts and keys decrypt on any machine. Only the
+  Termius-namespaced keyring entry is ever read or written. Because the
+  key rides in the `.tsb`, the backup password protects both the data and
+  the key together — losing the password still means losing both. Opt out
+  with `--no-carry-key`.
 
 ## Reporting a vulnerability
 

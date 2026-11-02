@@ -17,6 +17,7 @@ use std::io::{Read, Write};
 use std::path::Path;
 
 use crate::error::{Error, Result};
+use crate::keyring::CarriedKey;
 use crate::util;
 
 /// Inner-metadata entry name. Found by name at unpack time, so its position
@@ -35,6 +36,12 @@ pub struct ArchiveMeta {
     pub byte_size: u64,
     pub sha256_root: String,
     pub created_at: String,
+    /// Termius's OS-keyring `localKey`, carried so a restore on another
+    /// machine can install it there and decrypt the restored data.
+    /// Absent in archives made before it was carried (and on sources
+    /// without a keyring entry); it is not part of `sha256_root`.
+    #[serde(default)]
+    pub local_key: Option<CarriedKey>,
 }
 
 /// Accumulators for the single pack walk.
@@ -63,7 +70,9 @@ pub struct TarEntry {
 }
 
 /// Pack `root` (a directory) into a zstd-compressed tar held in `out`.
-/// `created_at` is an ISO-8601 timestamp string.
+/// `created_at` is an ISO-8601 timestamp string. If `local_key` is
+/// `Some`, the carried Termius key is stored in [`META_ENTRY_NAME`]
+/// alongside the other metadata.
 ///
 /// The tree is walked exactly once: every entry is appended to the tar and
 /// fed into the tree hash as it goes, and each file's content is streamed
@@ -71,7 +80,12 @@ pub struct TarEntry {
 /// exactly once). The recorded `sha256_root` therefore always describes
 /// precisely what was packed — even when the source is a live directory
 /// (a running Termius) that keeps changing during the pack.
-pub fn pack(root: &Path, out: &mut Vec<u8>, created_at: &str) -> Result<ArchiveMeta> {
+pub fn pack(
+    root: &Path,
+    out: &mut Vec<u8>,
+    created_at: &str,
+    local_key: Option<&CarriedKey>,
+) -> Result<ArchiveMeta> {
     if !root.is_dir() {
         return Err(Error::NotFound(format!(
             "source is not a directory: {}",
@@ -97,6 +111,7 @@ pub fn pack(root: &Path, out: &mut Vec<u8>, created_at: &str) -> Result<ArchiveM
             byte_size: stats.byte_size,
             sha256_root: util::hex::encode_lower_owned(&root_hasher.finalize()),
             created_at: created_at.to_string(),
+            local_key: local_key.cloned(),
         };
         let meta_bytes = serde_json::to_vec(&meta)?;
         let mut hdr = tar::Header::new_gnu();
@@ -589,7 +604,7 @@ mod tests {
         let src = tempfile::tempdir().unwrap();
         make_tree(src.path());
         let mut buf = Vec::new();
-        let meta = pack(src.path(), &mut buf, "2026-01-01T00:00:00Z").unwrap();
+        let meta = pack(src.path(), &mut buf, "2026-01-01T00:00:00Z", None).unwrap();
         assert!(meta.entry_count > 0);
 
         let dest = tempfile::tempdir().unwrap();
@@ -608,7 +623,7 @@ mod tests {
     fn empty_dir_round_trips() {
         let src = tempfile::tempdir().unwrap();
         let mut buf = Vec::new();
-        let meta = pack(src.path(), &mut buf, "2026-01-01T00:00:00Z").unwrap();
+        let meta = pack(src.path(), &mut buf, "2026-01-01T00:00:00Z", None).unwrap();
         let dest = tempfile::tempdir().unwrap();
         let (got, manifest) = unpack(&buf, dest.path()).unwrap();
         verify(dest.path(), &got, &manifest).unwrap();
@@ -621,7 +636,7 @@ mod tests {
         fs::create_dir_all(src.path().join("a b/c d")).unwrap();
         fs::write(src.path().join("a b/c d/file with spaces.txt"), b"x").unwrap();
         let mut buf = Vec::new();
-        pack(src.path(), &mut buf, "t").unwrap();
+        pack(src.path(), &mut buf, "t", None).unwrap();
         let dest = tempfile::tempdir().unwrap();
         unpack(&buf, dest.path()).unwrap();
         assert!(dest.path().join("a b/c d/file with spaces.txt").exists());
@@ -632,7 +647,7 @@ mod tests {
         let src = tempfile::tempdir().unwrap();
         fs::write(src.path().join("f.txt"), b"AAAAAAAAAA").unwrap();
         let mut buf = Vec::new();
-        pack(src.path(), &mut buf, "t").unwrap();
+        pack(src.path(), &mut buf, "t", None).unwrap();
         // zstd magic: 0x28 0xB5 0x2F 0xFD
         assert_eq!(&buf[..4], &[0x28, 0xb5, 0x2f, 0xfd]);
     }
@@ -645,8 +660,8 @@ mod tests {
         fs::write(b.path().join("f"), b"content-b").unwrap();
         let mut ba = Vec::new();
         let mut bb = Vec::new();
-        let ma = pack(a.path(), &mut ba, "t").unwrap();
-        let mb = pack(b.path(), &mut bb, "t").unwrap();
+        let ma = pack(a.path(), &mut ba, "t", None).unwrap();
+        let mb = pack(b.path(), &mut bb, "t", None).unwrap();
         assert_ne!(ma.sha256_root, mb.sha256_root);
     }
 
@@ -655,7 +670,7 @@ mod tests {
         let src = tempfile::tempdir().unwrap();
         fs::write(src.path().join("f"), b"original").unwrap();
         let mut buf = Vec::new();
-        let meta = pack(src.path(), &mut buf, "t").unwrap();
+        let meta = pack(src.path(), &mut buf, "t", None).unwrap();
         let dest = tempfile::tempdir().unwrap();
         let (_, manifest) = unpack(&buf, dest.path()).unwrap();
         fs::write(dest.path().join("f"), b"tampered").unwrap();
@@ -672,7 +687,7 @@ mod tests {
         let src = tempfile::tempdir().unwrap();
         make_tree(src.path());
         let mut buf = Vec::new();
-        pack(src.path(), &mut buf, "t").unwrap();
+        pack(src.path(), &mut buf, "t", None).unwrap();
         let dest = tempfile::tempdir().unwrap();
         let (mut got, manifest) = unpack(&buf, dest.path()).unwrap();
         // Simulate the older release's hash: non-empty, but unmatchable.
@@ -687,7 +702,7 @@ mod tests {
         let src = tempfile::tempdir().unwrap();
         make_tree(src.path());
         let mut buf = Vec::new();
-        pack(src.path(), &mut buf, "t").unwrap();
+        pack(src.path(), &mut buf, "t", None).unwrap();
         let dest = tempfile::tempdir().unwrap();
         let (got, manifest) = unpack(&buf, dest.path()).unwrap();
         fs::write(dest.path().join("hello.txt"), b"tampered").unwrap();
@@ -713,7 +728,7 @@ mod tests {
         let _sock = UnixListener::bind(src.path().join("sock")).unwrap();
 
         let mut buf = Vec::new();
-        let meta = pack(src.path(), &mut buf, "t").unwrap();
+        let meta = pack(src.path(), &mut buf, "t", None).unwrap();
         // The socket is not an archived entry.
         assert_eq!(meta.entry_count, 3);
         assert_eq!(meta.byte_size, 12);

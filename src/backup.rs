@@ -9,6 +9,7 @@ use crate::archive;
 use crate::container;
 use crate::crypto::KdfParams;
 use crate::error::{Error, Result};
+use crate::keyring;
 use crate::prompt;
 use crate::util;
 use crate::{paths, weakpass};
@@ -21,6 +22,43 @@ pub struct Options<'a> {
     pub password_env: Option<&'a str>,
     pub yes: bool,
     pub kdf: KdfParams,
+    /// Carry Termius's OS-keyring `localKey` into the archive so the
+    /// data decrypts on another machine (best-effort; see the `keyring`
+    /// module).
+    pub carry_key: bool,
+}
+
+/// Best-effort read of the Termius keyring key for archiving. Never fails
+/// the backup: a machine without the entry (or a locked/unavailable
+/// keyring) simply yields an archive without a carried key, and restore
+/// on the *same* machine still works.
+pub fn carried_key_or_warn(carry: bool) -> Option<crate::keyring::CarriedKey> {
+    if !carry {
+        return None;
+    }
+    match keyring::read_local_key() {
+        Ok(Some(k)) => {
+            eprintln!(
+                "Carrying Termius localKey ({}) so restored data decrypts on other machines.",
+                k.describe()
+            );
+            Some(k)
+        }
+        Ok(None) => {
+            eprintln!(
+                "note: no Termius localKey found in the OS keyring — a restore \
+                 on another machine would show empty hosts/keys."
+            );
+            None
+        }
+        Err(e) => {
+            eprintln!(
+                "warning: could not read the Termius localKey from the OS keyring \
+                 ({e}) — the backup will not carry it."
+            );
+            None
+        }
+    }
 }
 
 /// Run a backup. Returns the path written.
@@ -63,8 +101,14 @@ pub fn run(opts: Options<'_>) -> Result<PathBuf> {
 
     // Pack the directory into a compressed archive (the plaintext payload).
     eprintln!("Packing {} …", src.display());
+    let carried = carried_key_or_warn(opts.carry_key);
     let mut payload = Vec::new();
-    let meta = archive::pack(&src, &mut payload, &util::local_timestamp_string(&now))?;
+    let meta = archive::pack(
+        &src,
+        &mut payload,
+        &util::local_timestamp_string(&now),
+        carried.as_ref(),
+    )?;
     eprintln!(
         "Packed {} entries ({} bytes).",
         meta.entry_count, meta.byte_size

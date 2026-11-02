@@ -30,6 +30,9 @@ pub struct Flags<'a> {
     pub creds_file: Option<&'a Path>,
     pub service_secrets: Option<&'a Path>,
     pub yes: bool,
+    /// Carry/install the Termius keyring `localKey` (inverse of
+    /// `--no-carry-key`).
+    pub carry_key: bool,
 }
 
 /// Run the interactive menu. Requires a TTY on stdin; otherwise returns
@@ -154,6 +157,7 @@ fn backup_local(g: &Flags) -> Result<()> {
         password_file: g.password_file,
         password_env: g.password_env,
         yes: g.yes,
+        carry_key: g.carry_key,
         kdf: crypto::KdfParams::default(),
     };
     let p = backup::run(opts)?;
@@ -175,6 +179,7 @@ fn backup_gdrive(g: &Flags) -> Result<()> {
         creds_path: &creds,
         yes: g.yes,
         keep: 0, // one-shot backup keeps everything by default
+        carry_key: g.carry_key,
     })?;
     eprintln!("Done: backup in vault '{vault}' (Drive file {file_id})");
     let ctx = sync::ServiceCtx {
@@ -196,6 +201,7 @@ fn restore_local(g: &Flags) -> Result<()> {
         password_file: g.password_file,
         password_env: g.password_env,
         yes: g.yes,
+        carry_key: g.carry_key,
     };
     let p = restore::run(opts)?;
     eprintln!("Done: restored into {}", p.display());
@@ -215,6 +221,7 @@ fn restore_gdrive(g: &Flags) -> Result<()> {
         password_env: g.password_env,
         creds_path: &creds,
         yes: g.yes,
+        carry_key: g.carry_key,
     })?;
     eprintln!("Done: restored into {}", p.display());
     Ok(())
