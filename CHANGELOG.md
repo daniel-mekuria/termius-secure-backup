@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-02
+
 ### Added
 - **Cross-machine restore now works: the `localKey` is carried in the
   archive.** Termius encrypts every host/key field with a 32-byte
