@@ -86,6 +86,22 @@ pub fn pack(
     created_at: &str,
     local_key: Option<&CarriedKey>,
 ) -> Result<ArchiveMeta> {
+    pack_filtered(root, out, created_at, local_key, &|_| true)
+}
+
+/// [`pack`], restricted to the entries for which `include` returns true.
+/// `include` gets each entry's path relative to `root`; rejecting a
+/// directory skips its whole subtree. The recorded hash, counts, and the
+/// unpacked tree all describe the filtered set, so [`verify`] works
+/// unchanged. Used by two-way sync, which carries only part of the
+/// Termius data directory.
+pub fn pack_filtered(
+    root: &Path,
+    out: &mut Vec<u8>,
+    created_at: &str,
+    local_key: Option<&CarriedKey>,
+    include: &dyn Fn(&Path) -> bool,
+) -> Result<ArchiveMeta> {
     if !root.is_dir() {
         return Err(Error::NotFound(format!(
             "source is not a directory: {}",
@@ -100,7 +116,14 @@ pub fn pack(
     {
         let mut builder = tar::Builder::new(&mut tar_buf);
         builder.mode(tar::HeaderMode::Deterministic);
-        append_dir_recursive(&mut builder, root, root, &mut root_hasher, &mut stats)?;
+        append_dir_recursive(
+            &mut builder,
+            root,
+            root,
+            &mut root_hasher,
+            &mut stats,
+            include,
+        )?;
 
         // __meta.json rides along as a tar entry after the tree;
         // [`unpack`] finds it by name, so its position is not significant.
@@ -195,6 +218,7 @@ fn append_dir_recursive(
     current: &Path,
     root_hasher: &mut Sha256,
     stats: &mut PackStats,
+    include: &dyn Fn(&Path) -> bool,
 ) -> Result<()> {
     let mut entries: Vec<std::fs::DirEntry> =
         std::fs::read_dir(current)?.collect::<std::result::Result<_, _>>()?;
@@ -204,6 +228,9 @@ fn append_dir_recursive(
     for entry in entries {
         let path = entry.path();
         let rel = path.strip_prefix(root).unwrap_or(&path);
+        if !include(rel) {
+            continue;
+        }
         let meta = std::fs::symlink_metadata(&path)?;
         if !(meta.is_file() || meta.is_symlink() || meta.is_dir()) {
             continue; // sockets, fifos: not representable in the tar
@@ -250,7 +277,7 @@ fn append_dir_recursive(
             // non-zero st_size, Windows always 0) — not part of the
             // tree's identity, so hash it as 0.
             hash_tree_entry(root_hasher, &rel_name(root, &path, '/'), b'd', 0, &[]);
-            append_dir_recursive(builder, root, &path, root_hasher, stats)?;
+            append_dir_recursive(builder, root, &path, root_hasher, stats, include)?;
         } else {
             let mut f = std::fs::File::open(&path)?;
             let mut content_hash = Sha256::new();
@@ -617,6 +644,30 @@ mod tests {
         assert_eq!(txt, "hello world");
         let uni = fs::read_to_string(dest.path().join("sub/deeper/unicode-名前.txt")).unwrap();
         assert_eq!(uni, "名前 = name");
+    }
+
+    #[test]
+    fn filtered_pack_round_trips_and_verifies() {
+        let src = tempfile::tempdir().unwrap();
+        make_tree(src.path());
+        std::fs::create_dir_all(src.path().join("keep/inner")).unwrap();
+        std::fs::write(src.path().join("keep/inner/x.txt"), b"x").unwrap();
+        std::fs::write(src.path().join("keep/skip.me"), b"no").unwrap();
+        let mut buf = Vec::new();
+        let include = |rel: &Path| {
+            rel.starts_with("keep") && rel.file_name().map_or(true, |n| n != "skip.me")
+        };
+        let meta =
+            pack_filtered(src.path(), &mut buf, "2026-01-01T00:00:00Z", None, &include).unwrap();
+        // keep, keep/inner, keep/inner/x.txt
+        assert_eq!(meta.entry_count, 3);
+        let dest = tempfile::tempdir().unwrap();
+        let (meta2, manifest) = unpack(&buf, dest.path()).unwrap();
+        verify(dest.path(), &meta2, &manifest).unwrap();
+        assert!(dest.path().join("keep/inner/x.txt").is_file());
+        assert!(!dest.path().join("keep/skip.me").exists());
+        let top: Vec<_> = std::fs::read_dir(dest.path()).unwrap().collect();
+        assert_eq!(top.len(), 1, "only the included subtree is unpacked");
     }
 
     #[test]

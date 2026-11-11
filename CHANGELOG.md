@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Sync is now two-way, like Termius's own cloud sync.** Machines that
+  turn sync on for the same Google Drive vault keep each other's Termius
+  data in step: changes made on one machine are uploaded, and the vault's
+  newer snapshots from other machines are downloaded, verified, and
+  applied — as soon as Termius is closed on the receiving machine, since
+  Termius keeps its data open and cached while it runs. Sync carries the
+  `IndexedDB` store (hosts, groups, keys, identities, snippets, rules,
+  known hosts, tags, settings) plus the carried keyring `localKey`;
+  machine-specific data (`Local Storage` with the device's Termius
+  session tokens, `Local State`, caches) stays per device. When two
+  machines change data before either has synced, the first upload wins
+  and the other machine's changes are kept in a new `pre-sync` rollback
+  snapshot. A machine syncs with one vault at a time.
+- **Change detection reads the data, not the files.** A new read-only
+  LevelDB reader (log + table formats, Snappy, CRC32C) fingerprints the
+  logical key/value contents of Termius's user-data databases, so
+  LevelDB's file rewrites on every Termius start and Termius's own
+  background writes (activity logs, command history, last-connected
+  times) no longer count as changes.
+- **The interactive "Sync settings" page has two options: Turn on and
+  Turn off.** *Turn on* runs the Google Drive flow — login when needed,
+  master password, the vault to sync with (an existing one, so a second
+  device can join, or a new one), and its backup password, which is
+  checked against the vault's data — and asks how this machine starts
+  when the vault already has data (use the vault's data, keeping a
+  rollback snapshot of this machine's, or upload this machine's).
+  `gdrive sync on --name N` runs the same flow. *Turn off* stops sync.
+
+### Fixed
+- Windows: turning sync on started nothing until the next logon — the
+  Task Scheduler task is now started right away (and a running instance
+  is stopped before it is replaced or removed).
+- Windows: "turn off for all vaults" never found any sync task, because
+  `schtasks` lists task names with a leading `\`.
+- Linux: turning sync on again for a running unit now restarts it, so
+  new passwords take effect.
+- `--service-secrets <file>` failed at startup when the file did not
+  exist yet, although `gdrive sync on` is documented to create it.
+
 ## [0.4.0] - 2026-11-02
 
 ### Added

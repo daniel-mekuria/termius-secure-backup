@@ -36,8 +36,8 @@ pub struct Cli {
     pub creds_file: Option<PathBuf>,
 
     /// Read the Google Drive master password and the backup password from
-    /// this JSON file instead of prompting (for the continuous-sync
-    /// background service).
+    /// this JSON file instead of prompting (for the sync background
+    /// service; `gdrive sync on` creates it when missing).
     #[arg(long, global = true)]
     pub service_secrets: Option<PathBuf>,
 
@@ -173,8 +173,9 @@ pub enum GdriveAction {
     Backup(GdriveBackupArgs),
     /// Restore the Termius data directory from a backup on Google Drive.
     Restore,
-    /// Continuously re-back up to Google Drive while the Termius directory
-    /// changes (Ctrl-C to stop).
+    /// Two-way sync with a vault: upload this machine's Termius changes and
+    /// apply the ones other devices made (Ctrl-C to stop). `on`/`off` run
+    /// it as a background service.
     Sync(GdriveSyncArgs),
 }
 
@@ -191,39 +192,43 @@ pub struct GdriveBackupArgs {
 
 #[derive(Args, Debug)]
 pub struct GdriveSyncArgs {
-    /// Manage the continuous-sync offer: `gdrive sync off` / `gdrive sync on`.
+    /// Turn sync on or off: `gdrive sync on --name N` / `gdrive sync off`.
     #[command(subcommand)]
     pub command: Option<SyncCommand>,
     /// Vault name (prompts if absent; a `<name>.tsbak-vault` folder on Drive).
     #[arg(long)]
     pub name: Option<String>,
-    /// How often (seconds) to check for changes; minimum 5.
+    /// How often (seconds) to check this machine and the vault for changes;
+    /// minimum 5.
     #[arg(long, default_value_t = 60)]
     pub interval: u64,
-    /// Keep only the newest N backups in the vault (0 = keep all).
+    /// Keep only the newest N snapshots in the vault (0 = keep all).
     #[arg(long, default_value_t = 10)]
     pub keep: u32,
-    /// Check once, upload if changed, then exit (for cron / systemd timers).
+    /// Check once — upload this machine's changes or apply the vault's
+    /// newer data — then exit (for cron / systemd timers).
     #[arg(long)]
     pub once: bool,
 }
 
 #[derive(Subcommand, Debug)]
 pub enum SyncCommand {
-    /// Turn the continuous sync off: stop the vault's background service,
-    /// stop suggesting it after backups, and forget the recorded baseline
-    /// (all of it for every vault without `--name`). Explicit `gdrive
-    /// sync` runs are not affected.
+    /// Turn sync off: stop and remove the vault's background service, stop
+    /// suggesting sync after backups, and forget what this machine last
+    /// synced (for every vault without `--name`). The vault's data on
+    /// Drive is untouched.
     Off(SyncToggleArgs),
-    /// Turn the continuous sync back on: start the vault's background
-    /// service (it keeps syncing across reboots until turned off) and
-    /// re-enable the post-backup offer.
+    /// Turn two-way sync on for `--name`: check the backup password against
+    /// the vault, then install and start a background service that keeps
+    /// this machine and the vault in sync across reboots. A machine syncs
+    /// with one vault at a time. Without `--name`, only re-enables the
+    /// post-backup offer.
     On(SyncToggleArgs),
 }
 
 #[derive(Args, Debug)]
 pub struct SyncToggleArgs {
-    /// Vault to turn off (all vaults when absent).
+    /// Vault to turn on or off (`off`: all vaults when absent).
     #[arg(long)]
     pub name: Option<String>,
 }

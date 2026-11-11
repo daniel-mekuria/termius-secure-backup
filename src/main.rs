@@ -46,8 +46,9 @@ fn main() -> ExitCode {
     let result = (|| -> termius_secure_backup::error::Result<()> {
         // `--service-secrets` feeds both passwords to the run through
         // environment variables (one-shot reads, no prompts) — this is how
-        // the continuous-sync background service authenticates.
-        if let Some(p) = &g.service_secrets {
+        // the sync background service authenticates. A file that does not
+        // exist yet is created by `gdrive sync on`.
+        if let Some(p) = g.service_secrets.as_ref().filter(|p| p.is_file()) {
             let s = service::read_secrets(p)?;
             std::env::set_var("TSBAK_GDRIVE_MASTER_PASSWORD", &s.master_password);
             std::env::set_var("TSBAK_SERVICE_BACKUP_PASSWORD", &s.backup_password);
@@ -100,6 +101,7 @@ impl Refs {
         // explicit `--password-env`.
         self.service_secrets
             .as_ref()
+            .filter(|p| p.is_file())
             .map(|_| "TSBAK_SERVICE_BACKUP_PASSWORD")
             .or(self.password_env.as_deref())
     }
@@ -216,10 +218,14 @@ fn run_snapshots(g: &Refs, action: SnapshotsAction) -> termius_secure_backup::er
 
 fn run_gdrive(g: &Refs, action: GdriveAction) -> termius_secure_backup::error::Result<()> {
     let creds = paths::resolve_gdrive_creds_path(g.creds_file())?;
-    let ctx = sync::ServiceCtx {
+    let setup = sync::SyncSetup {
         creds_path: &creds,
-        yes: g.yes,
+        termius_dir: g.termius_dir(),
+        snapshots_dir: g.snapshots_dir(),
+        password_file: g.password_file(),
+        password_env: g.password_env(),
         secrets_file: g.service_secrets(),
+        yes: g.yes,
     };
     match action {
         GdriveAction::Login => gdrive::run_login(&creds)?,
@@ -237,7 +243,7 @@ fn run_gdrive(g: &Refs, action: GdriveAction) -> termius_secure_backup::error::R
                 carry_key: g.carry_key,
             })?;
             eprintln!("Done: backup in vault '{vault}' (Drive file {file_id})");
-            sync::offer_after_backup(g.termius_dir(), &ctx, &vault);
+            sync::offer_after_backup(&setup, &vault);
         }
         GdriveAction::Restore => {
             let p = gdrive::run_restore(gdrive::RestoreOptions {
@@ -278,41 +284,30 @@ fn run_gdrive(g: &Refs, action: GdriveAction) -> termius_secure_backup::error::R
                     ),
                 }
                 eprintln!(
-                    "Explicit 'gdrive sync' runs (and any systemd timer) are \
-                     unaffected; a future sync of a turned-off vault starts \
-                     from a fresh baseline."
+                    "The vaults and their data on Google Drive are untouched; \
+                     turning sync on again starts from a fresh comparison."
                 );
             }
             Some(SyncCommand::On(t)) => {
-                sync::sync_on(t.name.as_deref(), &ctx)?;
+                sync::sync_on(t.name.as_deref(), &setup)?;
                 match t.name.as_deref() {
-                    Some(n) => {
-                        println!(
-                            "Continuous sync turned on for vault '{n}' — the \
-                             background service {id} is running and will \
-                             survive reboots. Stop it with 'gdrive sync off'.",
-                            id = service::service_id(n)
-                        );
-                        if sync::sync_globally_off() {
-                            eprintln!(
-                                "Note: '{n}' is on, but 'off for all vaults' \
-                                 is still set, so every other vault remains \
-                                 off."
-                            );
-                        }
-                    }
-                    None => {
-                        println!(
-                            "Continuous sync turned back on for all vaults. \
-                             (The background service is per-vault: use \
-                             'gdrive sync on --name N' to start one.)"
-                        );
-                    }
+                    Some(n) => println!(
+                        "Sync turned on for vault '{n}' — the background service \
+                         {id} keeps this machine and the vault in sync both ways \
+                         and survives reboots. Stop it with 'gdrive sync off'.",
+                        id = service::service_id(n)
+                    ),
+                    None => println!(
+                        "Continuous sync turned back on for all vaults. \
+                         (Sync itself is per vault: use 'gdrive sync on --name N' \
+                         to start it.)"
+                    ),
                 }
             }
             None => {
                 sync::run_sync(sync::SyncOptions {
                     termius_dir: g.termius_dir(),
+                    snapshots_dir: g.snapshots_dir(),
                     name: a.name.as_deref(),
                     password_file: g.password_file(),
                     password_env: g.password_env(),
@@ -322,7 +317,6 @@ fn run_gdrive(g: &Refs, action: GdriveAction) -> termius_secure_backup::error::R
                     interval: a.interval,
                     keep: a.keep,
                     once: a.once,
-                    last_sig: None,
                     kdf: crypto::KdfParams::default(),
                 })?;
             }

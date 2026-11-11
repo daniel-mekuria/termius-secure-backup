@@ -25,6 +25,9 @@ pub enum Reason {
     PreRollback,
     /// Taken on explicit user request.
     Manual,
+    /// Taken before two-way sync replaces this machine's Termius data with
+    /// another device's (when this machine had changes of its own).
+    PreSync,
 }
 
 impl Reason {
@@ -33,6 +36,7 @@ impl Reason {
             Reason::PreRestore => "pre-restore",
             Reason::PreRollback => "pre-rollback",
             Reason::Manual => "manual",
+            Reason::PreSync => "pre-sync",
         }
     }
     #[allow(dead_code)]
@@ -41,6 +45,7 @@ impl Reason {
             "pre-restore" => Some(Reason::PreRestore),
             "pre-rollback" => Some(Reason::PreRollback),
             "manual" => Some(Reason::Manual),
+            "pre-sync" => Some(Reason::PreSync),
             _ => None,
         }
     }
@@ -392,7 +397,12 @@ mod tests {
 
     #[test]
     fn reason_roundtrip() {
-        for r in [Reason::PreRestore, Reason::PreRollback, Reason::Manual] {
+        for r in [
+            Reason::PreRestore,
+            Reason::PreRollback,
+            Reason::Manual,
+            Reason::PreSync,
+        ] {
             assert_eq!(Reason::from_tag(r.as_tag()), Some(r));
         }
         assert_eq!(Reason::from_tag("nope"), None);

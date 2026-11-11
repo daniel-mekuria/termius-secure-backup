@@ -208,23 +208,7 @@ pub fn installed_vaults() -> Vec<String> {
         else {
             return Vec::new();
         };
-        let text = String::from_utf8_lossy(&out.stdout);
-        let prefix = "termius-backup-sync-";
-        let mut found = Vec::new();
-        for line in text.lines() {
-            // CSV rows look like:  "task name", "next run", "status"
-            let name = line
-                .trim_start()
-                .strip_prefix('"')
-                .and_then(|rest| rest.split('"').next())
-                .unwrap_or("");
-            if let Some(slug) = name.strip_prefix(prefix) {
-                if !found.contains(&slug.to_string()) {
-                    found.push(slug.to_string());
-                }
-            }
-        }
-        found
+        parse_task_list(&String::from_utf8_lossy(&out.stdout))
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -247,6 +231,29 @@ pub fn installed_vaults() -> Vec<String> {
             })
             .collect()
     }
+}
+
+/// Our vault slugs from `schtasks /Query /FO CSV /NH` output. Rows look
+/// like `"\termius-backup-sync-laptop","N/A","Running"` — task names carry
+/// their folder path, so the root folder's leading `\` is stripped.
+#[cfg(any(target_os = "windows", test))]
+fn parse_task_list(text: &str) -> Vec<String> {
+    let prefix = "termius-backup-sync-";
+    let mut found = Vec::new();
+    for line in text.lines() {
+        let name = line
+            .trim_start()
+            .strip_prefix('"')
+            .and_then(|rest| rest.split('"').next())
+            .unwrap_or("");
+        let name = name.trim_start_matches('\\');
+        if let Some(slug) = name.strip_prefix(prefix) {
+            if !found.contains(&slug.to_string()) {
+                found.push(slug.to_string());
+            }
+        }
+    }
+    found
 }
 
 /// The directory holding this platform's service files.
@@ -297,7 +304,10 @@ fn install_linux(exe: &Path, vault: &str, secrets: &Path) -> Result<()> {
     }
     std::fs::write(&unit_path, unit_file_content(exe, vault, secrets))?;
     run_systemctl(&["daemon-reload"])?;
-    run_systemctl(&["enable", "--now", &id])?;
+    run_systemctl(&["enable", &id])?;
+    // `restart`, not `start`: when the unit was already running (sync
+    // turned on again), the new definition and passwords must take effect.
+    run_systemctl(&["restart", &id])?;
     Ok(())
 }
 
@@ -526,10 +536,23 @@ fn task_command_line(exe: &Path, vault: &str, secrets: &Path) -> String {
 fn install_windows(exe: &Path, vault: &str, secrets: &Path) -> Result<()> {
     let name = service_id(vault);
     let tr = task_command_line(exe, vault, secrets);
+    // A previous instance (sync turned on again) must not keep running
+    // with the old definition and passwords.
+    end_task(&name);
     run_schtasks(&[
         "/Create", "/F", "/SC", "ONLOGON", "/TN", &name, "/IT", "/TR", &tr,
     ])?;
+    // A logon task only fires at the next logon — start it now.
+    run_schtasks(&["/Run", "/TN", &name])?;
     Ok(())
+}
+
+/// Stop a running instance of the task, if any (best-effort).
+#[cfg(target_os = "windows")]
+fn end_task(name: &str) {
+    let _ = std::process::Command::new("schtasks")
+        .args(["/End", "/TN", name])
+        .output();
 }
 
 #[cfg(target_os = "windows")]
@@ -543,6 +566,8 @@ fn remove_windows(vault: &str) -> Result<bool> {
     if !existed {
         return Ok(false);
     }
+    // Deleting the task does not stop the process it started.
+    end_task(&name);
     let out = std::process::Command::new("schtasks")
         .args(["/Delete", "/F", "/TN", &name])
         .output()
@@ -613,6 +638,21 @@ mod tests {
                 "--yes",
             ]
         );
+    }
+
+    #[test]
+    fn task_list_parsing_strips_the_folder_backslash() {
+        let out = concat!(
+            r#""\termius-backup-sync-laptop","N/A","Running""#,
+            "\r\n",
+            r#""\Microsoft\Windows\Foo","N/A","Ready""#,
+            "\r\n",
+            r#""termius-backup-sync-old-style","N/A","Ready""#,
+            "\r\n",
+            r#""\termius-backup-sync-laptop","N/A","Running""#,
+            "\r\n",
+        );
+        assert_eq!(parse_task_list(out), vec!["laptop", "old-style"]);
     }
 
     #[test]

@@ -1282,6 +1282,14 @@ pub(crate) fn encrypt_with(
     Ok(std::fs::read(tmp.path())?)
 }
 
+/// Decrypt an in-memory `.tsb` container (header checks + AEAD), returning
+/// the plaintext payload. A wrong password is [`Error::PasswordRejected`].
+pub(crate) fn decrypt_tsb(tsb: &[u8], password: &[u8]) -> Result<Vec<u8>> {
+    let tmp = tempfile::NamedTempFile::new()?;
+    std::fs::write(tmp.path(), tsb)?;
+    container::read_and_decrypt(tmp.path(), password)
+}
+
 /// Encrypt `plaintext` into an in-memory `.tsb` container (production KDF).
 fn encrypt_to_tsb(password: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
     encrypt_with(&KdfParams::default(), password, plaintext)
@@ -1326,6 +1334,11 @@ pub fn run_backup(opts: BackupOptions<'_>) -> Result<(String, String)> {
     // Backup password (re-entry + weak gate) — encrypts the payload.
     let password = backup::acquire_password(opts.password_file, opts.password_env, true, opts.yes)?;
 
+    // Fingerprint the synced data *before* packing: a change that lands
+    // after this point is then seen as unsynced by a later two-way sync
+    // and uploaded, instead of being silently counted as already synced.
+    let sync_fp = crate::termius_data::fingerprint(&src).ok();
+
     eprintln!("Packing {} …", src.display());
     let carried = backup::carried_key_or_warn(opts.carry_key);
     let mut payload = Vec::new();
@@ -1347,10 +1360,10 @@ pub fn run_backup(opts: BackupOptions<'_>) -> Result<(String, String)> {
     let folder_id = session.ensure_vault(&name)?;
     let file_id = session.upload_file(&folder_id, &file_name, &tsb)?;
 
-    // Keep the sync baseline fresh: a later `gdrive sync` (or a cron
-    // `--once` run) should not re-upload the state this backup just saved.
-    if let Ok(sig) = crate::sync::dir_signature(&src) {
-        crate::sync::record_sync_state(&name, sig);
+    // This machine's data now matches the vault's newest snapshot: a
+    // two-way sync of the vault must neither re-upload it nor apply it.
+    if let Some(fp) = sync_fp {
+        crate::sync::record_synced(&name, &file_id, fp);
     }
 
     // Optional retention: trim older backups down to the newest `keep`.

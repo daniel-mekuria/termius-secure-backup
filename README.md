@@ -94,12 +94,13 @@ Back up to where?
 - **Google Drive** → runs the login flow if you are not logged in yet; if you
   are, it asks for your master password, then continues (vault name + backup
   password for backup, vault/backup selection for restore).
-- **Sync settings** → shows the current state of continuous sync and lets
-  you turn it off or back on, for one vault or for all — the interactive
-  version of `gdrive sync off` / `gdrive sync on`. Turning a vault on
-  installs its background service (see *The background service*), which
-  asks for the two unattended passwords once when they were never stored;
-  turning things off only touches local state.
+- **Sync settings** → shows whether sync is on and offers two options:
+  **Turn on** and **Turn off**. *Turn on* runs the Google Drive flow —
+  the login (when you are not logged in yet), your master password, the
+  vault to sync with (pick the one your other devices sync with, or
+  create a new one), and its backup password — and starts two-way sync
+  in the background (see *Two-way sync between devices*). *Turn off*
+  stops it.
 - **Add to PATH** → the interactive version of `install`: puts
   `termius-backup` on your PATH so it can be run from anywhere (see below).
 
@@ -231,110 +232,113 @@ Uploaded backups are identical `.tsb` files, so `info`, local `restore`, and
 `--password-file`, `--password-env`, `--yes`, and `--creds-file` apply to
 `gdrive backup` / `gdrive restore` as they do to the local commands.
 
-### Continuous sync with Google Drive
+### Two-way sync between devices
 
-`gdrive sync` keeps a vault up to date automatically: it watches the Termius
-data directory and uploads a fresh encrypted `.tsb` whenever it changes.
-
-After a successful `gdrive backup` the tool also offers continuous sync,
-with a three-way choice:
-
-- **Yes — start continuous sync now** installs the continuous sync as a
-  background service (see *The background service* below): the backup
-  you just made becomes the baseline, so the service's first upload only
-  happens when Termius actually changes something. It keeps running after
-  this terminal closes and after reboots, until you stop it.
-- **No — and don't ask me again for '<vault>'** turns the offer off for
-  that vault, so it will not be asked again (see *Turning sync off* below).
-- **No — ask me again next time** declines once; the question is asked
-  again after the next backup. A bare Enter keeps this behavior.
+Turn sync on on two (or more) machines with the **same vault** and they
+keep each other's Termius data in step, like Termius's own (paid) cloud
+sync: a host, group, key, identity, snippet, or setting you add, change,
+or delete on one machine shows up on the others.
 
 ```sh
-# Watch the directory and re-backup as Termius changes (Ctrl-C to stop):
-termius-backup gdrive sync --name laptop
-
-# Cron / systemd timer friendly: check once, upload if changed, exit:
-termius-backup gdrive sync --name laptop --once
+termius-backup                                  # → Sync settings → Turn on
+termius-backup gdrive sync on --name team       # the same, from the CLI
+termius-backup gdrive sync off                  # turn it off
 ```
 
-- **The path is remembered**: `--termius-dir` is only needed once.
-  Whatever directory a sync run watches (from the flag, or from the
-  interactive "where is Termius" prompt) is saved in the sync state file,
-  and later `gdrive sync` runs — including `--once` from cron or a systemd
-  timer — reuse it without the flag, and say so when they do. An explicit
-  `--termius-dir` always overrides the saved path, and a saved path that no
-  longer exists falls back to the normal auto-detection.
-- **How change detection works**: every `--interval` seconds (default 60,
-  minimum 5) the tool fingerprints the tree (file count + total size + newest
-  mtime). An upload happens only once the tree has been *unchanged* for a few
-  seconds (the debounce, ≤ 10 s), so a half-written file is never captured;
-  if the fingerprint still moves during packing, that window is skipped and
-  re-checked on the next tick. A tree that never settles (Termius is always
-  writing something) is force-uploaded every 15 minutes anyway.
-- **Baselines survive reboots**: every upload — and every `gdrive backup` —
-  records the fingerprint of the tree it just saved in
-  `~/.config/termius-secure-backup/sync-state.json` (plain JSON, counts and
-  sizes only, no file names). `--once` runs compare the current tree against
-  *that record*, not against themselves, so a scheduled run uploads exactly
-  when Termius has changed since the last run — even across reboots. The very
-  first run (no record yet) uploads the current tree.
-- **Two ways to keep it running**: `gdrive sync` without `--once` is a
-  foreground watcher — handy for watching syncs happen live, but it stops
-  when you Ctrl-C it or the machine reboots. For a sync that runs on its
-  own and survives reboots, install the background service (below), or
-  run `--once` from a systemd timer.
-- **Retention**: `--keep N` (default 10) trims the vault to the newest N
-  backups after each upload; `--keep 0` keeps everything. `gdrive backup
-  --keep N` applies the same retention once per run.
-- **Passwords**: the master password unlocks the stored Google credentials
-  up front (a wrong one fails fast), and the backup password is asked once
-  and cached in memory for the whole session — you are not re-prompted on
-  every upload. In `--once` mode set `TSBAK_GDRIVE_MASTER_PASSWORD` and
+Turning sync on asks for the Google Drive login (only when you are not
+logged in yet), your master password, the vault, and the vault's backup
+password — the same one on every device, so it is checked right away
+against the vault's data. When the vault already holds data, you choose
+how this machine starts:
+
+- **Use the vault's data on this machine** (recommended when another
+  device already syncs with the vault) — this machine's current Termius
+  data is kept in a rollback snapshot first.
+- **Upload this machine's data** — the vault, and every other syncing
+  device, switch to it.
+
+Sync then runs as a background service (see below) that keeps going
+after reboots until you turn it off. Every minute it compares this
+machine and the vault:
+
+- **Your changes go up.** When this machine's Termius data changes and
+  the change has settled for a few seconds, an encrypted snapshot is
+  uploaded to the vault.
+- **Other devices' changes come down.** When the vault has a newer
+  snapshot from another device, it is downloaded, decrypted, and
+  verified right away, and applied as soon as **Termius is closed** on
+  this machine — Termius keeps its data open and cached while it runs, so
+  it shows the new data the next time you start it. If Termius is closed
+  when the change arrives, it is applied immediately.
+
+What is synced, and what is not:
+
+- **Synced:** Termius's `IndexedDB` store — hosts, groups, SSH keys,
+  identities, snippets, port-forwarding rules, known hosts, tags, and
+  settings — plus the OS-keyring `localKey` that decrypts it (see
+  *Where is my Termius data?*), so synced hosts and keys decrypt on
+  every device.
+- **Not synced:** everything machine-specific — `Local Storage` (this
+  device's Termius session and device tokens), Chromium's `Local State`
+  (a machine-bound key), caches, logs, and window state.
+- **Not a reason to sync:** Termius writes activity logs, terminal
+  command history, and last-connected times on its own, and its
+  database engine (LevelDB) rewrites its files on every start. Change
+  detection looks at the logical contents of your data, not at files,
+  so none of that triggers an upload by itself (it does travel along
+  with real changes).
+
+**When two machines change data at the same time.** A whole-state sync
+cannot merge edits made on two devices before either has synced: the
+first device to upload wins, and the other device's own changes are
+replaced — but never lost. They are kept in a `pre-sync` rollback
+snapshot (`termius-backup rollback` restores them), and the vault keeps
+older versions too (`--keep`). The usual way to hit this: Termius stays
+open on machine B (so B cannot pick up A's change yet) and you edit
+something on B before restarting Termius there. Restarting Termius
+after switching machines avoids it.
+
+A machine syncs with **one vault at a time** (they would all write the
+same Termius data); turning sync on for another vault stops the first.
+
+The sync can also run in the foreground or from a timer:
+
+```sh
+# Watch and sync both ways in this terminal (Ctrl-C to stop):
+termius-backup gdrive sync --name team
+
+# Cron / systemd timer friendly: one check (upload or apply), then exit:
+termius-backup gdrive sync --name team --once
+```
+
+- **The path is remembered**: `--termius-dir` is only needed once. The
+  directory a sync uses is saved in
+  `~/.config/termius-secure-backup/sync-state.json`, which also records,
+  per vault, which vault snapshot this machine last matched and a hash
+  of its data at that point (ids and hashes only — no Termius data).
+- **Retention**: `--keep N` (default 10) trims the vault to the newest
+  N snapshots after each upload; `--keep 0` keeps everything.
+- **Passwords**: in `--once` mode set `TSBAK_GDRIVE_MASTER_PASSWORD` and
   `--password-file`/`--password-env` for a fully unattended run.
-- **Network hiccups** (and a Google token that expires mid-run) are retried
-  on the next tick — the watcher keeps running; Ctrl-C is the only stop.
+- **Network hiccups** and an expiring Google token are retried on the
+  next check; a problem is reported once, not every minute.
 
-Example systemd timer (daily unattended sync at ~03:07):
-
-```ini
-# /etc/systemd/system/tsbak-sync.service
-[Unit]
-Description=Termius → Google Drive sync (once)
-
-[Service]
-Type=oneshot
-Environment=TSBAK_GDRIVE_MASTER_PASSWORD=change-me
-ExecStart=/usr/local/bin/termius-backup gdrive sync --name laptop --once --password-file /var/lib/tsbak/pw
-
-# /etc/systemd/system/tsbak-sync.timer
-[Unit]
-Description=Daily Termius sync
-
-[Timer]
-OnCalendar=*-*-* 03:07:00
-Persistent=true
-```
+After a successful `gdrive backup` the tool also offers to turn sync on
+for that vault: **Yes** turns it on (the backup you just made counts as
+already synced), **No — and don't ask me again** turns the offer off for
+that vault, and **No — ask me again next time** (a bare Enter) declines
+once.
 
 #### The background service
 
-For a sync that runs itself — no terminal, no timer — the tool can
-install the sync as a **per-vault background service**: it starts at
-login, restarts itself whenever it exits, and keeps going after reboots
-until you turn it off:
-
-```sh
-termius-backup gdrive sync on --name laptop     # install and start it
-termius-backup gdrive sync off --name laptop    # stop and remove it
-```
-
-Saying **Yes** to the post-backup offer does the same. The first "on"
-for a vault asks for the two passwords an unattended run needs — the
-Google Drive master password (unlocks the stored credentials) and the
-backup password (encrypts each upload) — and stores them in
+`gdrive sync on --name N`, **Turn on** in the menu, and **Yes** to the
+post-backup offer all install the sync as a background service that
+starts right away, starts again at every login, and keeps going until
+you turn it off. The two passwords an unattended run needs — the Google
+Drive master password and the backup password — are stored in
 `~/.config/termius-secure-backup/sync-service-<vault>.json` with
-owner-only permissions; later "on" runs reuse that file without asking,
-and `gdrive sync off` removes it again. Instead of answering the prompts
-you can point at your own file with `--service-secrets <file>` (JSON:
+owner-only permissions; turning sync off removes that file. Instead you
+can point at your own file with `--service-secrets <file>` (JSON:
 `{"master_password": "...", "backup_password": "..."}`).
 
 What it installs, per platform:
@@ -350,35 +354,21 @@ What it installs, per platform:
   `~/Library/LaunchAgents/com.termius-secure-backup.sync-<vault>.plist`
   (`KeepAlive`); its output goes to
   `~/Library/Logs/termius-backup-sync-<vault>.log`.
-- **Windows** — a Task Scheduler task that runs at logon.
+- **Windows** — a Task Scheduler task, `termius-backup-sync-<vault>`,
+  that runs at logon (and is started immediately when sync is turned
+  on); its console window shows the sync log.
 
-**Turning sync off.** `gdrive sync off` stops and removes the vault's
-background service (every one of them, without `--name`), and also turns
-off the post-backup offer, so the tool stops suggesting continuous sync:
+**Turning sync off.** **Turn off** in the menu, or `gdrive sync off`,
+stops and removes every background sync service on this machine, forgets
+what it last synced, and turns off the post-backup offer. The vaults and
+their data on Google Drive are not touched, and neither is this
+machine's Termius data.
 
 ```sh
 termius-backup gdrive sync off                  # all vaults
-termius-backup gdrive sync off --name laptop    # just one vault
-termius-backup gdrive sync on                   # re-enable the offer
-termius-backup gdrive sync on --name laptop     # install its service
+termius-backup gdrive sync off --name team      # just one vault
+termius-backup gdrive sync on                   # only re-enable the offer
 ```
-
-(`on` without `--name` only re-enables the offer — the service is
-per-vault, so only `on --name N` starts one.)
-
-With "off for all vaults" set, turning a single vault back on turns on
-**only that vault** — every other vault stays off.
-
-The same switch is available interactively: picking **Sync settings** in
-the no-subcommand menu shows the current state and toggles it per vault
-or for all vaults, and the post-backup offer's *"No — and don't ask me
-again"* option turns it off for just that vault.
-
-Turning a vault off also forgets its recorded baseline — and deletes the
-default secrets file, so a later `gdrive sync on` asks for the two
-passwords again — so a fresh sync for that vault starts from the current
-tree. The switch does not affect explicit `gdrive sync` runs or a systemd
-timer: those work regardless.
 
 ### Google sign-in: nothing to set up
 
