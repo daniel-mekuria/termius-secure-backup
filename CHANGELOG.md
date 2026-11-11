@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-11
+
 ### Changed
 - **Sync is now two-way, like Termius's own cloud sync.** Machines that
   turn sync on for the same Google Drive vault keep each other's Termius
