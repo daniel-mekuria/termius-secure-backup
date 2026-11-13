@@ -84,10 +84,23 @@ What would you like to do?
   [2] Restore
   [3] Sync settings
   [4] Add to PATH
+  [5] Exit
 Back up to where?
   [1] Local file
   [2] Google Drive
+  [3] ← Back
 ```
+
+**Going back.** Every menu after the first has a **← Back** row, and
+**Esc** goes back too (on the first menu, Esc exits). Back works inside
+the flows as well: in a Google Drive restore, Back on the backup list
+returns to the vault list, and Back on the vault list returns to *Restore
+from where?*; while turning sync on, Back returns from *How should this
+machine start syncing?* to the vault list, and from there to the Sync
+page. A flow's first text question (the vault name for a Google Drive
+backup, the email at login, the file path for a local restore, the name
+of a new sync vault) goes back when you leave it empty and press Enter.
+Password prompts have no Back: press Ctrl+C to quit.
 
 - **Local** → asks for the output (backup) or input (restore) file path, then
   the password — the same flow as the `backup`/`restore` commands.

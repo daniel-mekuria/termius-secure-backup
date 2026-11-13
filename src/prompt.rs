@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Interactive prompts: password entry (hidden), confirmations, and the
+//! Interactive prompts: password entry (hidden), confirmations, menus
+//! (with a "← Back" row where there is somewhere to go back to), and the
 //! weak-password re-confirmation gate.
 
 use std::io::{self, IsTerminal, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::error::{Error, Result};
 use crate::weakpass::{self, Strength};
@@ -219,40 +221,146 @@ pub fn ask_string(prompt: &str, default: Option<&str>) -> Result<String> {
     }
 }
 
+/// Label of the extra menu row that goes back to the previous menu.
+pub const BACK: &str = "← Back";
+
+/// Set while the interactive menu runs: every flow it starts can then go
+/// back to it from the flow's first menu or question (see
+/// [`choose_step`] and [`ask_string_step`]).
+static BACK_OUT: AtomicBool = AtomicBool::new(false);
+
+/// Let the first menu or question of every flow go back to the menu
+/// that started it. Called by the interactive menu ([`crate::wizard`]);
+/// subcommands, which have no menu to go back to, never call it.
+pub fn allow_back_out() {
+    BACK_OUT.store(true, Ordering::Relaxed);
+}
+
+fn back_out_allowed() -> bool {
+    BACK_OUT.load(Ordering::Relaxed)
+}
+
 /// Present a numbered menu of options and return the chosen index.
 /// `default` is the pre-selected option (what a bare Enter confirms on a
 /// TTY); it is clamped to the list bounds.
 pub fn choose(label: &str, options: &[String], default: usize) -> Result<usize> {
+    select(label, options, default, None)?
+        .ok_or_else(|| Error::Canceled("no option was selected".into()))
+}
+
+/// A menu with one extra row, labeled `leave`, that leaves it (e.g.
+/// [`BACK`] or "Exit"). Returns `Ok(None)` when that row is picked or
+/// Esc (or q) is pressed.
+pub fn choose_or_leave(
+    label: &str,
+    options: &[String],
+    default: usize,
+    leave: &str,
+) -> Result<Option<usize>> {
+    select(label, options, default, Some(leave))
+}
+
+/// A menu with a "← Back" row (Esc also goes back). `Ok(None)` means
+/// back.
+pub fn choose_back(label: &str, options: &[String], default: usize) -> Result<Option<usize>> {
+    choose_or_leave(label, options, default, BACK)
+}
+
+/// The first menu of a flow. When the flow was started from the
+/// interactive menu it has a "← Back" row, and going back returns
+/// [`Error::Back`] so the flow unwinds to that menu; otherwise it is a
+/// plain [`choose`].
+pub fn choose_step(label: &str, options: &[String], default: usize) -> Result<usize> {
+    if back_out_allowed() {
+        choose_back(label, options, default)?.ok_or(Error::Back)
+    } else {
+        choose(label, options, default)
+    }
+}
+
+fn select(
+    label: &str,
+    options: &[String],
+    default: usize,
+    leave: Option<&str>,
+) -> Result<Option<usize>> {
     if options.is_empty() {
         return Err(Error::NotFound("no options to choose from".into()));
     }
     let default = default.min(options.len() - 1);
     if io::stdin().is_terminal() {
         let theme = dialoguer::theme::ColorfulTheme::default();
-        let idx = dialoguer::Select::with_theme(&theme)
+        let mut items: Vec<&str> = options.iter().map(String::as_str).collect();
+        items.extend(leave);
+        let menu = dialoguer::Select::with_theme(&theme)
             .with_prompt(label)
-            .items(options)
-            .default(default)
-            .interact()
-            .map_err(|e| Error::Canceled(format!("select failed: {e}")))?;
-        Ok(idx)
+            .items(&items)
+            .default(default);
+        let picked = if leave.is_some() {
+            // Esc or q leave, like the extra row.
+            menu.interact_opt()
+        } else {
+            menu.interact().map(Some)
+        }
+        .map_err(|e| Error::Canceled(format!("select failed: {e}")))?;
+        Ok(picked.filter(|&i| i < options.len()))
     } else {
         eprintln!("{label}:");
         for (i, o) in options.iter().enumerate() {
             eprintln!("  [{i}] {o}");
         }
+        if let Some(l) = leave {
+            eprintln!("  [b] {l}");
+        }
         eprint!("choose number: ");
         let _ = io::stderr().flush();
         let mut line = String::new();
         io::stdin().read_line(&mut line)?;
-        let n: usize = line
-            .trim()
-            .parse()
-            .map_err(|_| Error::Canceled("invalid selection".into()))?;
-        if n >= options.len() {
-            return Err(Error::Canceled("selection out of range".into()));
-        }
-        Ok(n)
+        parse_selection(&line, options.len(), leave.is_some())
+    }
+}
+
+/// A typed menu answer: an option number, or `b`/`back` for the extra
+/// leave row when the menu has one (`Ok(None)`).
+fn parse_selection(line: &str, len: usize, can_leave: bool) -> Result<Option<usize>> {
+    let s = line.trim();
+    if can_leave && (s.eq_ignore_ascii_case("b") || s.eq_ignore_ascii_case("back")) {
+        return Ok(None);
+    }
+    let n: usize = s
+        .parse()
+        .map_err(|_| Error::Canceled("invalid selection".into()))?;
+    if n >= len {
+        return Err(Error::Canceled("selection out of range".into()));
+    }
+    Ok(Some(n))
+}
+
+/// A required free-text answer where an empty answer goes back:
+/// `Ok(None)` means back. A non-interactive session cannot be asked
+/// (the same error as [`ask_string`] without a default).
+pub fn ask_string_back(prompt: &str) -> Result<Option<String>> {
+    if !io::stdin().is_terminal() {
+        return ask_string(prompt, None).map(Some);
+    }
+    eprintln!("{prompt}");
+    eprintln!("  (leave it empty and press Enter to go back)");
+    let mut line = String::new();
+    if io::stdin().read_line(&mut line)? == 0 {
+        return Err(Error::Canceled("input ended — no value given".into()));
+    }
+    let s = line.trim();
+    Ok((!s.is_empty()).then(|| s.to_string()))
+}
+
+/// The first question of a flow: [`ask_string`] without a default, except
+/// that when the flow was started from the interactive menu an empty
+/// answer goes back to it ([`Error::Back`]).
+pub fn ask_string_step(prompt: &str) -> Result<String> {
+    if back_out_allowed() {
+        ask_string_back(prompt)?.ok_or(Error::Back)
+    } else {
+        ask_string(prompt, None)
     }
 }
 
@@ -308,6 +416,27 @@ mod tests {
         );
         assert!(matches!(out, Err(Error::NotLoggedIn)));
         assert_eq!(tries, 1);
+    }
+
+    #[test]
+    fn typed_menu_answers_pick_an_option_or_go_back() {
+        assert_eq!(parse_selection("1\n", 3, true).unwrap(), Some(1));
+        assert_eq!(parse_selection(" 0 \r\n", 3, false).unwrap(), Some(0));
+        assert_eq!(parse_selection("b\n", 3, true).unwrap(), None);
+        assert_eq!(parse_selection("Back\n", 3, true).unwrap(), None);
+        // No leave row: "b" is not an answer.
+        assert!(matches!(
+            parse_selection("b\n", 3, false),
+            Err(Error::Canceled(_))
+        ));
+        assert!(matches!(
+            parse_selection("3\n", 3, true),
+            Err(Error::Canceled(_))
+        ));
+        assert!(matches!(
+            parse_selection("\n", 3, true),
+            Err(Error::Canceled(_))
+        ));
     }
 
     #[test]

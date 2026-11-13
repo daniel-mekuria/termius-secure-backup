@@ -316,76 +316,102 @@ pub fn turn_on(setup: &SyncSetup, name: Option<&str>) -> Result<String> {
     let (src, _) = resolve_sync_termius_dir(setup.termius_dir)?;
     remember_termius_dir(&src);
 
-    let name = match name {
-        Some(n) if !n.trim().is_empty() => n.trim().to_string(),
-        _ => choose_vault(&mut session)?,
-    };
-    let folder_id = session.ensure_vault(&name)?;
-    let newest = session.list_backups(&folder_id)?.into_iter().next();
+    let given = name
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .map(str::to_string);
+    // Repeats when the user goes back from the start choice to the vault
+    // list.
+    let (name, backup_password, synced) = loop {
+        let name = match &given {
+            Some(n) => n.clone(),
+            None => choose_vault(&mut session)?,
+        };
+        let folder_id = session.ensure_vault(&name)?;
+        let newest = session.list_backups(&folder_id)?.into_iter().next();
 
-    // The backup password must be the one the vault's data is encrypted
-    // with — every syncing device shares it — so check it right here.
-    let backup_password = match &newest {
-        Some(b) => {
-            eprintln!(
-                "Vault '{name}' already has data — enter its backup password \
-                 (the one your other devices use)."
-            );
-            let tsb = session.download_file(&b.id)?;
-            let mut accepted = None;
-            backup::acquire_and_decrypt(setup.password_file, setup.password_env, false, |pw| {
-                let mut plain = gdrive::decrypt_tsb(&tsb, pw.as_bytes())?;
-                zeroize(&mut plain);
-                accepted = Some(pw.to_string());
-                Ok(())
-            })?;
-            accepted.expect("set by a successful decrypt")
-        }
-        None => backup::acquire_password(setup.password_file, setup.password_env, true, setup.yes)?,
-    };
+        // The backup password must be the one the vault's data is
+        // encrypted with — every syncing device shares it — so check it
+        // right here.
+        let backup_password = match &newest {
+            Some(b) => {
+                eprintln!(
+                    "Vault '{name}' already has data — enter its backup password \
+                     (the one your other devices use)."
+                );
+                let tsb = session.download_file(&b.id)?;
+                let mut accepted = None;
+                backup::acquire_and_decrypt(
+                    setup.password_file,
+                    setup.password_env,
+                    false,
+                    |pw| {
+                        let mut plain = gdrive::decrypt_tsb(&tsb, pw.as_bytes())?;
+                        zeroize(&mut plain);
+                        accepted = Some(pw.to_string());
+                        Ok(())
+                    },
+                )?;
+                accepted.expect("set by a successful decrypt")
+            }
+            None => {
+                backup::acquire_password(setup.password_file, setup.password_env, true, setup.yes)?
+            }
+        };
 
-    // How this machine starts.
-    let mut file = load_state_file(&state_path);
-    let previous = file.synced.get(&name).cloned().unwrap_or_default();
-    let synced = match &newest {
-        // Empty vault: this machine's data goes up first.
-        None => VaultSync::default(),
-        // Already in step with the vault's newest data (e.g. right after
-        // `gdrive backup`, or turning sync on again).
-        Some(b) if previous.head.as_deref() == Some(b.id.as_str()) => previous,
-        Some(b) => {
-            if use_vault_data(&name, b, setup.yes)? {
-                if src.is_dir() {
-                    let snaps = paths::resolve_snapshots_dir(setup.snapshots_dir)?;
-                    let m = snapshot::create(
-                        &snaps,
-                        &src,
-                        Reason::PreSync,
-                        None,
-                        &util::current_time(),
-                    )?;
-                    eprintln!(
-                        "This machine's current Termius data was saved in rollback \
-                         snapshot {} ('termius-backup rollback' restores it).",
-                        m.id
-                    );
-                }
-                // Nothing synced yet, local data as it is now: the vault's
-                // newest snapshot is applied on the first check.
-                VaultSync {
-                    head: None,
-                    fingerprint: Some(termius_data::fingerprint(&src)?),
-                }
-            } else {
-                // In step with the vault's head, local data unknown: it is
-                // uploaded on the first check and becomes the new head.
-                VaultSync {
-                    head: Some(b.id.clone()),
-                    fingerprint: None,
+        // How this machine starts.
+        let previous = load_state_file(&state_path)
+            .synced
+            .get(&name)
+            .cloned()
+            .unwrap_or_default();
+        let synced = match &newest {
+            // Empty vault: this machine's data goes up first.
+            None => VaultSync::default(),
+            // Already in step with the vault's newest data (e.g. right
+            // after `gdrive backup`, or turning sync on again).
+            Some(b) if previous.head.as_deref() == Some(b.id.as_str()) => previous,
+            Some(b) => {
+                let Some(take_vault) = use_vault_data(&name, b, setup.yes, given.is_none())? else {
+                    continue; // back to the vault list
+                };
+                if take_vault {
+                    if src.is_dir() {
+                        let snaps = paths::resolve_snapshots_dir(setup.snapshots_dir)?;
+                        let m = snapshot::create(
+                            &snaps,
+                            &src,
+                            Reason::PreSync,
+                            None,
+                            &util::current_time(),
+                        )?;
+                        eprintln!(
+                            "This machine's current Termius data was saved in \
+                             rollback snapshot {} ('termius-backup rollback' \
+                             restores it).",
+                            m.id
+                        );
+                    }
+                    // Nothing synced yet, local data as it is now: the
+                    // vault's newest snapshot is applied on the first check.
+                    VaultSync {
+                        head: None,
+                        fingerprint: Some(termius_data::fingerprint(&src)?),
+                    }
+                } else {
+                    // In step with the vault's head, local data unknown: it
+                    // is uploaded on the first check and becomes the new
+                    // head.
+                    VaultSync {
+                        head: Some(b.id.clone()),
+                        fingerprint: None,
+                    }
                 }
             }
-        }
+        };
+        break (name, backup_password, synced);
     };
+    let mut file = load_state_file(&state_path);
 
     // The two passwords the unattended service needs.
     let secrets_path = match setup.secrets_file {
@@ -437,12 +463,13 @@ pub fn turn_on(setup: &SyncSetup, name: Option<&str>) -> Result<String> {
 }
 
 /// Pick the vault to sync with: one already on Drive (where the other
-/// devices' data is), or a new one.
+/// devices' data is), or a new one. An empty new-vault name goes back to
+/// the list.
 fn choose_vault(session: &mut gdrive::Session) -> Result<String> {
     const NEW_PROMPT: &str = "Name for the new sync vault (a <name>.tsbak-vault folder on Drive):";
     let vaults = session.list_vaults()?;
     if vaults.is_empty() {
-        return prompt::ask_string(NEW_PROMPT, None);
+        return prompt::ask_string_step(NEW_PROMPT);
     }
     let mut labels: Vec<String> = vaults
         .iter()
@@ -459,24 +486,39 @@ fn choose_vault(session: &mut gdrive::Session) -> Result<String> {
         })
         .collect();
     labels.push("Create a new vault".to_string());
-    let i = prompt::choose(
-        "Which vault should this machine sync with? (to share data with \
-         other devices, pick the vault they sync with)",
-        &labels,
-        0,
-    )?;
-    match vaults.get(i) {
-        Some(v) => Ok(gdrive::vault_base_name(&v.name).to_string()),
-        None => prompt::ask_string(NEW_PROMPT, None),
+    let mut i = 0;
+    loop {
+        i = prompt::choose_step(
+            "Which vault should this machine sync with? (to share data with \
+             other devices, pick the vault they sync with)",
+            &labels,
+            i,
+        )?;
+        match vaults.get(i) {
+            Some(v) => return Ok(gdrive::vault_base_name(&v.name).to_string()),
+            None => {
+                if let Some(name) = prompt::ask_string_back(NEW_PROMPT)? {
+                    return Ok(name);
+                }
+            }
+        }
     }
 }
 
 /// When the vault already has data this machine has not synced with:
-/// should this machine take the vault's data (true) or upload its own
-/// (false)? Non-interactive runs take the vault's data — this machine's
-/// data is kept in a rollback snapshot, while uploading would replace the
-/// data on every other device.
-fn use_vault_data(name: &str, newest: &gdrive::RemoteBackup, yes: bool) -> Result<bool> {
+/// should this machine take the vault's data (`Some(true)`) or upload its
+/// own (`Some(false)`)? Non-interactive runs take the vault's data — this
+/// machine's data is kept in a rollback snapshot, while uploading would
+/// replace the data on every other device.
+///
+/// `None` means the user went back to the vault list (only offered when
+/// `back_to_vaults`, i.e. the vault was picked from it).
+fn use_vault_data(
+    name: &str,
+    newest: &gdrive::RemoteBackup,
+    yes: bool,
+    back_to_vaults: bool,
+) -> Result<Option<bool>> {
     let when = newest
         .created
         .map(|t| util::local_timestamp_string(&t))
@@ -486,25 +528,27 @@ fn use_vault_data(name: &str, newest: &gdrive::RemoteBackup, yes: bool) -> Resul
             "Vault '{name}' already has data (last saved {when}) — this machine \
              will switch to it."
         );
-        return Ok(true);
+        return Ok(Some(true));
     }
-    let i = prompt::choose(
-        &format!(
-            "Vault '{name}' already has data (last saved {when}). How should \
-             this machine start syncing?"
-        ),
-        &[
-            "Use the vault's data on this machine (recommended when other \
-             devices already sync with it — this machine's current data is \
-             kept in a rollback snapshot)"
-                .to_string(),
-            "Upload this machine's data (the vault and every other syncing \
-             device switch to it)"
-                .to_string(),
-        ],
-        0,
-    )?;
-    Ok(i == 0)
+    let label = format!(
+        "Vault '{name}' already has data (last saved {when}). How should \
+         this machine start syncing?"
+    );
+    let options = [
+        "Use the vault's data on this machine (recommended when other \
+         devices already sync with it — this machine's current data is \
+         kept in a rollback snapshot)"
+            .to_string(),
+        "Upload this machine's data (the vault and every other syncing \
+         device switch to it)"
+            .to_string(),
+    ];
+    let i = if back_to_vaults {
+        prompt::choose_back(&label, &options, 0)?
+    } else {
+        Some(prompt::choose_step(&label, &options, 0)?)
+    };
+    Ok(i.map(|i| i == 0))
 }
 
 /// Turn sync off on this machine: stop and remove every background sync
@@ -1229,43 +1273,49 @@ pub fn offer_after_backup(setup: &SyncSetup, vault_name: &str) {
     if active_vault().as_deref() == Some(base) {
         return;
     }
-    // A bare Enter keeps the old behavior (decline, ask again next time).
-    let choice = match prompt::choose(
-        &format!(
-            "Keep this machine in sync with vault '{base}'? (two-way: changes \
-             made here are uploaded, changes from your other devices are \
-             applied; it runs as a background service that survives reboots)"
-        ),
-        &[
-            "Yes — turn sync on now".to_string(),
-            format!("No — and don't ask me again for '{base}'"),
-            "No — ask me again next time".to_string(),
-        ],
-        2,
-    ) {
-        Ok(c) => c,
-        Err(_) => return, // e.g. Ctrl-C at the prompt — the backup is done
-    };
-    if choice == 1 {
-        match sync_off(Some(base)) {
-            Ok(_) => eprintln!(
-                "OK — I won't ask about vault '{base}' again \
-                 ('gdrive sync on' turns it back on)."
+    loop {
+        // A bare Enter keeps the old behavior (decline, ask again next time).
+        let choice = match prompt::choose(
+            &format!(
+                "Keep this machine in sync with vault '{base}'? (two-way: \
+                 changes made here are uploaded, changes from your other \
+                 devices are applied; it runs as a background service that \
+                 survives reboots)"
             ),
-            Err(e) => eprintln!("could not remember that choice: {e}"),
+            &[
+                "Yes — turn sync on now".to_string(),
+                format!("No — and don't ask me again for '{base}'"),
+                "No — ask me again next time".to_string(),
+            ],
+            2,
+        ) {
+            Ok(c) => c,
+            Err(_) => return, // e.g. Ctrl-C at the prompt — the backup is done
+        };
+        if choice == 1 {
+            match sync_off(Some(base)) {
+                Ok(_) => eprintln!(
+                    "OK — I won't ask about vault '{base}' again \
+                     ('gdrive sync on' turns it back on)."
+                ),
+                Err(e) => eprintln!("could not remember that choice: {e}"),
+            }
+            return;
+        }
+        if choice != 0 {
+            return;
+        }
+        match turn_on(setup, Some(base)) {
+            Ok(v) => eprintln!(
+                "Sync is on for vault '{v}' ({id}). It survives reboots — turn \
+                 it off with 'gdrive sync off' or the Sync settings menu.",
+                id = service::service_id(&v),
+            ),
+            // Went back from the sync setup: ask again.
+            Err(Error::Back) => continue,
+            Err(e) => eprintln!("Sync not turned on: {e}"),
         }
         return;
-    }
-    if choice != 0 {
-        return;
-    }
-    match turn_on(setup, Some(base)) {
-        Ok(v) => eprintln!(
-            "Sync is on for vault '{v}' ({id}). It survives reboots — turn it \
-             off with 'gdrive sync off' or the Sync settings menu.",
-            id = service::service_id(&v),
-        ),
-        Err(e) => eprintln!("Sync not turned on: {e}"),
     }
 }
 

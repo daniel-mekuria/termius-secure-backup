@@ -11,6 +11,11 @@
 //! password, vault, backup password) and starts two-way sync in the
 //! background; "Turn off" stops it. "Add to PATH" is the interactive
 //! version of `termius-backup install`.
+//!
+//! Navigation: every page after the first has a "← Back" row (Esc also
+//! goes back), and so does the first menu of each flow — going back there
+//! (or leaving the flow's first text question empty) returns to the page
+//! the flow was started from. Page 1 has an "Exit" row (Esc also exits).
 
 use std::io::IsTerminal;
 use std::path::Path;
@@ -40,72 +45,105 @@ pub fn run(g: &Flags) -> Result<()> {
     if !std::io::stdin().is_terminal() {
         return Err(Error::NoSubcommand);
     }
+    // Every flow below is started from a page of this menu, so its first
+    // menu or question can go back to that page.
+    prompt::allow_back_out();
 
-    // Page 1: action.
-    let action = prompt::choose(
-        "What would you like to do?",
-        &[
-            "Backup".to_string(),
-            "Restore".to_string(),
-            "Sync settings".to_string(),
-            "Add to PATH".to_string(),
-        ],
-        0,
-    )?;
+    let mut action = 0;
+    let mut backend = 0;
+    loop {
+        // Page 1: action.
+        action = match prompt::choose_or_leave(
+            "What would you like to do?",
+            &[
+                "Backup".to_string(),
+                "Restore".to_string(),
+                "Sync settings".to_string(),
+                "Add to PATH".to_string(),
+            ],
+            action,
+            "Exit",
+        )? {
+            Some(a) => a,
+            None => return Ok(()),
+        };
 
-    if action == 2 {
-        return sync_settings(g);
-    }
-    if action == 3 {
-        return crate::install::run(g.yes);
-    }
-
-    // Page 2: backend.
-    let backend = prompt::choose(
-        match action {
-            0 => "Back up to where?",
-            _ => "Restore from where?",
-        },
-        &["Local file".to_string(), "Google Drive".to_string()],
-        0,
-    )?;
-
-    match (action, backend) {
-        (0, 0) => backup_local(g),
-        (0, 1) => backup_gdrive(g),
-        (1, 0) => restore_local(g),
-        (1, 1) => restore_gdrive(g),
-        _ => unreachable!("prompt::choose returns a valid index"),
+        let outcome = match action {
+            2 => sync_settings(g),
+            3 => crate::install::run(g.yes),
+            _ => loop {
+                // Page 2: backend.
+                backend = match prompt::choose_back(
+                    match action {
+                        0 => "Back up to where?",
+                        _ => "Restore from where?",
+                    },
+                    &["Local file".to_string(), "Google Drive".to_string()],
+                    backend,
+                )? {
+                    Some(b) => b,
+                    None => break Err(Error::Back),
+                };
+                let flow = match (action, backend) {
+                    (0, 0) => backup_local(g),
+                    (0, _) => backup_gdrive(g),
+                    (_, 0) => restore_local(g),
+                    _ => restore_gdrive(g),
+                };
+                match flow {
+                    // Went back from the flow: show page 2 again.
+                    Err(Error::Back) => continue,
+                    done => break done,
+                }
+            },
+        };
+        match outcome {
+            // Went back to page 1.
+            Err(Error::Back) => continue,
+            done => return done,
+        }
     }
 }
 
 /// The sync page: shows whether sync is on, then offers "Turn on" and
-/// "Turn off". Turning on runs the Google Drive flow — login when no
-/// credentials are stored yet, then the master password, the vault to
-/// sync with (one your other devices already use, or a new one), and its
-/// backup password — and starts two-way sync as a background service.
+/// "Turn off" (and "← Back" to page 1). Turning on runs the Google Drive
+/// flow — login when no credentials are stored yet, then the master
+/// password, the vault to sync with (one your other devices already use,
+/// or a new one), and its backup password — and starts two-way sync as a
+/// background service.
 fn sync_settings(g: &Flags) -> Result<()> {
-    let was_on = sync::is_on();
-    eprintln!("Sync is currently {}.", sync::status_line());
-    let choice = prompt::choose(
-        "Sync",
-        &["Turn on".to_string(), "Turn off".to_string()],
-        usize::from(was_on),
-    )?;
-    if choice == 1 {
-        sync::turn_off()?;
-        if was_on {
-            eprintln!(
-                "Sync is off: the background sync service was stopped and removed. \
-                 Your data on this machine and in the vault on Google Drive is \
-                 untouched."
-            );
-        } else {
-            eprintln!("Sync is already off.");
+    loop {
+        let was_on = sync::is_on();
+        eprintln!("Sync is currently {}.", sync::status_line());
+        let choice = prompt::choose_back(
+            "Sync",
+            &["Turn on".to_string(), "Turn off".to_string()],
+            usize::from(was_on),
+        )?
+        .ok_or(Error::Back)?;
+        if choice == 1 {
+            sync::turn_off()?;
+            if was_on {
+                eprintln!(
+                    "Sync is off: the background sync service was stopped and \
+                     removed. Your data on this machine and in the vault on \
+                     Google Drive is untouched."
+                );
+            } else {
+                eprintln!("Sync is already off.");
+            }
+            return Ok(());
         }
-        return Ok(());
+        match turn_sync_on(g) {
+            // Went back from the Google Drive flow: show this page again.
+            Err(Error::Back) => continue,
+            done => return done,
+        }
     }
+}
 
+/// "Turn on" on the sync page.
+fn turn_sync_on(g: &Flags) -> Result<()> {
     let creds = paths::resolve_gdrive_creds_path(g.creds_file)?;
     if !creds.exists() {
         gdrive::run_login(&creds)?;
@@ -182,9 +220,10 @@ fn backup_gdrive(g: &Flags) -> Result<()> {
     Ok(())
 }
 
-/// Local restore: prompts for the input .tsb path, then password.
+/// Local restore: prompts for the input .tsb path (empty goes back), then
+/// password.
 fn restore_local(g: &Flags) -> Result<()> {
-    let file = prompt::ask_string("Path to the .tsb backup file:", None)?;
+    let file = prompt::ask_string_step("Path to the .tsb backup file:")?;
     let opts = restore::Options {
         backup_file: Path::new(&file),
         termius_dir: g.termius_dir,

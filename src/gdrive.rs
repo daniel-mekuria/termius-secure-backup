@@ -1213,7 +1213,7 @@ pub fn run_login(creds_path: &Path) -> Result<()> {
     }
     let client_id = client_id();
     let client_secret = client_secret();
-    let email = prompt::ask_string("Google Drive account email (labels this backup):", None)?;
+    let email = prompt::ask_string_step("Google Drive account email (labels this backup):")?;
     let tokens = match device_flow(&client_id, client_secret.as_deref()) {
         Ok(t) => t,
         Err(e) if device_flow_unavailable(&e) => {
@@ -1321,10 +1321,9 @@ pub fn run_backup(opts: BackupOptions<'_>) -> Result<(String, String)> {
 
     let name = match opts.name {
         Some(n) if !n.trim().is_empty() => n.trim().to_string(),
-        _ => prompt::ask_string(
-            "Name for this backup (a <name>.tsbak-vault folder on Drive):",
-            None,
-        )?,
+        _ => {
+            prompt::ask_string_step("Name for this backup (a <name>.tsbak-vault folder on Drive):")?
+        }
     };
     let vault_name = vault_folder_name(&name);
 
@@ -1417,30 +1416,34 @@ pub fn run_restore(opts: RestoreOptions<'_>) -> Result<PathBuf> {
             )
         })
         .collect();
-    let vi = prompt::choose("Select a vault", &vault_labels, 0)?;
-    let vault = &vaults[vi];
+    let mut vi = 0;
+    let (vault, backup) = loop {
+        vi = prompt::choose_step("Select a vault", &vault_labels, vi)?;
+        let vault = &vaults[vi];
 
-    // 2. List and choose a backup.
-    let backups = session.list_backups(&vault.id)?;
-    if backups.is_empty() {
-        return Err(Error::NotFound(format!(
-            "vault '{}' has no backups",
-            vault.name
-        )));
-    }
-    eprintln!("Backups in vault '{}':", vault.name);
-    let backup_labels: Vec<String> = backups
-        .iter()
-        .map(|b| {
-            let d = b
-                .created
-                .map(|t| util::local_timestamp_string(&t))
-                .unwrap_or_default();
-            format!("{}  ({} bytes, created {d})", b.name, b.size)
-        })
-        .collect();
-    let bi = prompt::choose("Select a backup to restore", &backup_labels, 0)?;
-    let backup = &backups[bi];
+        // 2. List and choose a backup ("← Back" returns to the vaults).
+        let mut backups = session.list_backups(&vault.id)?;
+        if backups.is_empty() {
+            return Err(Error::NotFound(format!(
+                "vault '{}' has no backups",
+                vault.name
+            )));
+        }
+        eprintln!("Backups in vault '{}':", vault.name);
+        let backup_labels: Vec<String> = backups
+            .iter()
+            .map(|b| {
+                let d = b
+                    .created
+                    .map(|t| util::local_timestamp_string(&t))
+                    .unwrap_or_default();
+                format!("{}  ({} bytes, created {d})", b.name, b.size)
+            })
+            .collect();
+        if let Some(bi) = prompt::choose_back("Select a backup to restore", &backup_labels, 0)? {
+            break (vault, backups.swap_remove(bi));
+        }
+    };
 
     // 3. Download to a temp file.
     let tsb_bytes = session.download_file(&backup.id)?;

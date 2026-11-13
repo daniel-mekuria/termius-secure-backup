@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Back navigation in the interactive menu.** Every menu after the first
+  has a "← Back" row, and Esc goes back too (on the first menu, which now
+  has an "Exit" row, Esc exits). Back also works inside the flows: from
+  the backup list to the vault list in a Google Drive restore, from the
+  "how should this machine start syncing?" choice to the vault list when
+  turning sync on, and from a flow's first menu or question to the page
+  that started it. A flow's first text question (vault name, login email,
+  the file path for a local restore, new sync vault name) goes back when
+  left empty.
+
 ## [0.5.0] - 2026-11-11
 
 ### Changed

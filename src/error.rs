@@ -28,7 +28,7 @@ impl From<Error> for ExitCode {
     fn from(e: Error) -> Self {
         use Error as E;
         match e {
-            E::Canceled(_) => ExitCode::Canceled,
+            E::Canceled(_) | E::Back => ExitCode::Canceled,
             E::Auth(_) | E::PasswordRejected => ExitCode::Auth,
             E::BadFormat { .. }
             | E::UnsupportedVersion { .. }
@@ -50,6 +50,11 @@ pub enum Error {
     Io(io::Error),
 
     Canceled(String),
+
+    /// The user went back to the previous menu. A flow started from the
+    /// interactive menu returns it from its first menu or question; the
+    /// menu catches it and shows the page the flow was started from.
+    Back,
 
     Auth(String),
 
@@ -96,6 +101,7 @@ impl std::fmt::Display for Error {
         match self {
             E::Io(e) => write!(f, "I/O error: {}", friendly_io(e)),
             E::Canceled(msg) => write!(f, "canceled: {msg}"),
+            E::Back => write!(f, "canceled: went back to the previous menu"),
             E::Auth(msg) => write!(f, "authentication failed: {msg}"),
             E::PasswordRejected => write!(
                 f,
