@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-13
+
 ### Added
 - **Back navigation in the interactive menu.** Every menu after the first
   has a "← Back" row, and Esc goes back too (on the first menu, which now
