@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Turning sync on again on Windows could leave two syncs running.** When the
+  background sync was started through the per-user startup fallback, turning
+  sync on again only stopped a scheduled task, not that process. It now stops
+  the old process before starting the new one.
+
 ## [0.5.2] - 2026-11-22
 
 ### Fixed

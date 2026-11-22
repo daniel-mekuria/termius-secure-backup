@@ -606,6 +606,7 @@ fn install_windows(exe: &Path, vault: &str, secrets: &Path) -> Result<()> {
     // A previous instance (sync turned on again) must not keep running
     // with the old definition and passwords.
     end_task(&name);
+    end_fallback_process(vault);
     let _ = std::process::Command::new("reg")
         .args(["delete", RUN_KEY, "/v", &name, "/f"])
         .output();
