@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-11-22
+
 ### Fixed
 - **Google sign-in failed with "Error 400: invalid_request" on Windows.** The
   browser was launched through `cmd /C start`, which treats every `&` in the
@@ -18,7 +20,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tool now falls back to a per-user `HKCU\...\Run` startup entry (no admin
   needed), starts the sync immediately without a console window, and turning
   sync off removes the entry and stops that process.
-
 
 ## [0.5.1] - 2026-11-13
 
