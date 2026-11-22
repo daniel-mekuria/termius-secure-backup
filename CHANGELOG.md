@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-11-22
+
 ### Fixed
 - **Turning sync on again on Windows could leave two syncs running.** When the
   background sync was started through the per-user startup fallback, turning
