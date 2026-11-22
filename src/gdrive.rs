@@ -493,7 +493,10 @@ fn open_browser(url: &str) -> bool {
     let (prog, args): (&str, &[&str]) = if cfg!(target_os = "macos") {
         ("open", &[url])
     } else if cfg!(target_os = "windows") {
-        ("cmd", &["/C", "start", "", url])
+        // Not `cmd /C start`: cmd treats every `&` in the URL as a command
+        // separator, truncating it to `…?client_id=…` (Google then answers
+        // "Error 400: invalid_request"). rundll32 takes the URL verbatim.
+        ("rundll32", &["url.dll,FileProtocolHandler", url])
     } else {
         ("xdg-open", &[url])
     };

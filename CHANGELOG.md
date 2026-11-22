@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Google sign-in failed with "Error 400: invalid_request" on Windows.** The
+  browser was launched through `cmd /C start`, which treats every `&` in the
+  authorization URL as a command separator and cut it down to `client_id=…`.
+  It now uses `rundll32 url.dll,FileProtocolHandler`, which passes the URL
+  through intact.
+- **Turning sync on failed with "Access is denied" on Windows** from a
+  non-elevated prompt, because `schtasks /SC ONLOGON` needs admin rights. The
+  tool now falls back to a per-user `HKCU\...\Run` startup entry (no admin
+  needed), starts the sync immediately without a console window, and turning
+  sync off removes the entry and stops that process.
+
+
 ## [0.5.1] - 2026-11-13
 
 ### Added

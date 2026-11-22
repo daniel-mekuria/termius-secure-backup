@@ -7,7 +7,9 @@
 //!   `~/.config/systemd/user/termius-backup-sync-<vault>.service`
 //! - macOS: a launchd LaunchAgent at
 //!   `~/Library/LaunchAgents/com.termius-secure-backup.sync-<vault>.plist`
-//! - Windows: a Task Scheduler logon task (`schtasks /SC ONLOGON`)
+//! - Windows: a Task Scheduler logon task (`schtasks /SC ONLOGON`), or —
+//!   when that needs admin rights the user doesn't have — a per-user
+//!   `HKCU\...\Run` entry
 //!
 //! On every platform the service runs, unattended:
 //!
@@ -144,11 +146,7 @@ fn service_file(vault: &str) -> Option<PathBuf> {
 pub fn service_installed(vault: &str) -> bool {
     #[cfg(target_os = "windows")]
     {
-        std::process::Command::new("schtasks")
-            .args(["/Query", "/TN", &service_id(vault)])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+        windows_task_exists(&service_id(vault)) || windows_run_key_exists(&service_id(vault))
     }
     #[cfg(not(target_os = "windows"))]
     service_file(vault).is_some_and(|p| p.symlink_metadata().is_ok())
@@ -202,13 +200,18 @@ pub fn installed_vaults() -> Vec<String> {
     #[cfg(target_os = "windows")]
     {
         // Task Scheduler: enumerate and filter by our task-name prefix.
-        let Ok(out) = std::process::Command::new("schtasks")
+        let tasks = std::process::Command::new("schtasks")
             .args(["/Query", "/FO", "CSV", "/NH"])
             .output()
-        else {
-            return Vec::new();
-        };
-        parse_task_list(&String::from_utf8_lossy(&out.stdout))
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default();
+        let mut found = parse_task_list(&tasks);
+        for slug in parse_run_key_list(&windows_run_key_dump()) {
+            if !found.contains(&slug) {
+                found.push(slug);
+            }
+        }
+        found
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -249,6 +252,23 @@ fn parse_task_list(text: &str) -> Vec<String> {
         let name = name.trim_start_matches('\\');
         if let Some(slug) = name.strip_prefix(prefix) {
             if !found.contains(&slug.to_string()) {
+                found.push(slug.to_string());
+            }
+        }
+    }
+    found
+}
+
+/// Our vault slugs from `reg query HKCU\…\Run` output. Value rows look
+/// like `    termius-backup-sync-laptop    REG_SZ    "C:\…\termius-backup.exe" …`.
+#[cfg(any(target_os = "windows", test))]
+fn parse_run_key_list(text: &str) -> Vec<String> {
+    let prefix = "termius-backup-sync-";
+    let mut found = Vec::new();
+    for line in text.lines() {
+        let name = line.split_whitespace().next().unwrap_or("");
+        if let Some(slug) = name.strip_prefix(prefix) {
+            if !slug.is_empty() && !found.contains(&slug.to_string()) {
                 found.push(slug.to_string());
             }
         }
@@ -533,17 +553,87 @@ fn task_command_line(exe: &Path, vault: &str, secrets: &Path) -> String {
 }
 
 #[cfg(target_os = "windows")]
+const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+
+#[cfg(target_os = "windows")]
+fn windows_task_exists(name: &str) -> bool {
+    std::process::Command::new("schtasks")
+        .args(["/Query", "/TN", name])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_run_key_exists(name: &str) -> bool {
+    std::process::Command::new("reg")
+        .args(["query", RUN_KEY, "/v", name])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_run_key_dump() -> String {
+    std::process::Command::new("reg")
+        .args(["query", RUN_KEY])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default()
+}
+
+/// Start the sync now, detached and without a console window.
+#[cfg(target_os = "windows")]
+fn spawn_detached(exe: &Path, vault: &str, secrets: &Path) -> Result<()> {
+    use std::os::windows::process::CommandExt;
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    std::process::Command::new(exe)
+        .args(service_args(vault, secrets))
+        .creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| Error::Other(format!("could not start the sync process: {e}")))?;
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
 fn install_windows(exe: &Path, vault: &str, secrets: &Path) -> Result<()> {
     let name = service_id(vault);
     let tr = task_command_line(exe, vault, secrets);
     // A previous instance (sync turned on again) must not keep running
     // with the old definition and passwords.
     end_task(&name);
-    run_schtasks(&[
+    let _ = std::process::Command::new("reg")
+        .args(["delete", RUN_KEY, "/v", &name, "/f"])
+        .output();
+    let created = run_schtasks(&[
         "/Create", "/F", "/SC", "ONLOGON", "/TN", &name, "/IT", "/TR", &tr,
-    ])?;
-    // A logon task only fires at the next logon — start it now.
-    run_schtasks(&["/Run", "/TN", &name])?;
+    ]);
+    match created {
+        // A logon task only fires at the next logon — start it now.
+        Ok(_) => {
+            run_schtasks(&["/Run", "/TN", &name])?;
+        }
+        // Creating a logon task needs an elevated prompt ("Access is
+        // denied" otherwise). Fall back to a per-user Run entry, which
+        // needs no admin rights and also starts the sync at every logon.
+        Err(task_err) => {
+            let out = std::process::Command::new("reg")
+                .args(["add", RUN_KEY, "/v", &name, "/t", "REG_SZ", "/d", &tr, "/f"])
+                .output()
+                .map_err(|e| Error::Other(format!("could not run 'reg': {e}")))?;
+            if !out.status.success() {
+                return Err(Error::Other(format!(
+                    "{task_err}; the per-user startup fallback also failed: {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                )));
+            }
+            spawn_detached(exe, vault, secrets)?;
+        }
+    }
     Ok(())
 }
 
@@ -555,16 +645,35 @@ fn end_task(name: &str) {
         .output();
 }
 
+/// Stop a sync process started by the Run-key fallback (best-effort):
+/// match our executable by its `--service-secrets` command line.
+#[cfg(target_os = "windows")]
+fn end_fallback_process(vault: &str) {
+    let v = vault.replace('\'', "''");
+    let script = format!(
+        "Get-CimInstance Win32_Process | Where-Object {{ $_.Name -like 'termius-backup*'          -and $_.CommandLine -like '*--service-secrets*'          -and $_.CommandLine -like '*--name {v} *' }} |          ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force }}"
+    );
+    let _ = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .output();
+}
+
 #[cfg(target_os = "windows")]
 fn remove_windows(vault: &str) -> Result<bool> {
     let name = service_id(vault);
-    let existed = std::process::Command::new("schtasks")
-        .args(["/Query", "/TN", &name])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+    let had_run_key = windows_run_key_exists(&name);
+    if had_run_key {
+        let _ = std::process::Command::new("reg")
+            .args(["delete", RUN_KEY, "/v", &name, "/f"])
+            .output();
+    }
+    let existed = windows_task_exists(&name);
     if !existed {
-        return Ok(false);
+        if had_run_key {
+            // The fallback process was started detached; stop it too.
+            end_fallback_process(vault);
+        }
+        return Ok(had_run_key);
     }
     // Deleting the task does not stop the process it started.
     end_task(&name);
@@ -653,6 +762,16 @@ mod tests {
             "\r\n",
         );
         assert_eq!(parse_task_list(out), vec!["laptop", "old-style"]);
+    }
+
+    #[test]
+    fn run_key_list_parsing_finds_our_values() {
+        let out = concat!(
+            "\r\nHKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\r\n",
+            "    OneDrive    REG_SZ    \"C:\\x\\OneDrive.exe\" /background\r\n",
+            "    termius-backup-sync-actual-backup    REG_SZ    \"C:\\t.exe\" gdrive sync\r\n",
+        );
+        assert_eq!(parse_run_key_list(out), vec!["actual-backup"]);
     }
 
     #[test]
